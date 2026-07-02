@@ -62,13 +62,11 @@
 #include "misc/jni.h"
 #include "osdep/threads.h"
 #include "osdep/timer.h"
-#include "video/img_format.h"
 #include "video/out/gpu/hwdec.h"
 #include "video/out/vulkan/context.h"
 #include "video/out/placebo/ra_pl.h"
 
 #include "aimagereader_vk_shader.h"
-#include "aimagereader_vk_yuv_shader.h"
 
 #define AHB_VK_EXTENSION "VK_ANDROID_external_memory_android_hardware_buffer"
 #define FOREIGN_VK_EXTENSION "VK_EXT_queue_family_foreign"
@@ -126,15 +124,10 @@ struct priv {
     // Path choice, decided per buffer format.
     bool direct;
 
-    // Repack path state, recreated when the buffer's format changes. When the driver accepts an
-    // identity ycbcr conversion the repack emits three raw Y'CbCr planes (pre-matrix signal, so
-    // the Dolby Vision component reshape stays valid); otherwise it falls back to driver-matrixed
-    // RGB with the reshape disabled.
-    bool yuv;
+    // Repack path state, recreated when the buffer's format changes.
     uint64_t cur_external_format;
     VkFormat cur_format;
     VkSamplerYcbcrModelConversion cur_model;
-    VkSamplerYcbcrRange cur_range;
     VkSamplerYcbcrConversion conv;
     VkSampler sampler;
     VkDescriptorSetLayout dsl;
@@ -152,13 +145,11 @@ struct priv {
     // Direct path: per-frame plane wrappers, freed one frame late.
     struct ra_tex *plane_ra[2], *prev_plane_ra[2];
 
-    // Repack path: owned output images the compute pass writes (3 r16 planes on the YUV path,
-    // 1 rgba16 on the RGB fallback).
-    int num_out;
-    pl_tex out_tex[3];
-    struct ra_tex *out_ra[3];
-    VkImage out_image[3];
-    VkImageView out_view[3];
+    // Repack path: owned output image the compute pass writes.
+    pl_tex out_tex;
+    struct ra_tex *out_ra;
+    VkImage out_image;
+    VkImageView out_view;
     uint32_t out_w, out_h;
 };
 
@@ -464,18 +455,15 @@ static void destroy_output(struct ra_hwdec_mapper *mapper)
 {
     struct priv *p = mapper->priv;
 
-    for (int i = 0; i < 3; i++) {
-        if (p->out_view[i]) {
-            vkDestroyImageView(p->dev, p->out_view[i], NULL);
-            p->out_view[i] = VK_NULL_HANDLE;
-        }
-        if (p->out_ra[i]) {
-            ra_tex_free(mapper->ra, &p->out_ra[i]);
-            p->out_tex[i] = NULL;
-            p->out_image[i] = VK_NULL_HANDLE;
-        }
+    if (p->out_view) {
+        vkDestroyImageView(p->dev, p->out_view, NULL);
+        p->out_view = VK_NULL_HANDLE;
     }
-    p->num_out = 0;
+    if (p->out_ra) {
+        ra_tex_free(mapper->ra, &p->out_ra);
+        p->out_tex = NULL;
+        p->out_image = VK_NULL_HANDLE;
+    }
     p->out_w = p->out_h = 0;
 }
 
@@ -493,7 +481,6 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
     p->cur_external_format = fmt->externalFormat;
     p->cur_format = fmt->format;
     p->cur_model = fmt->suggestedYcbcrModel;
-    p->cur_range = fmt->suggestedYcbcrRange;
 
     MP_VERBOSE(p, "AHB import: vkFormat=%d externalFormat=0x%llx model=%d range=%d\n",
                (int)fmt->format, (unsigned long long)fmt->externalFormat,
@@ -519,23 +506,11 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
     if (!(fmt->formatFeatures &
           VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT))
         conv_info.chromaFilter = VK_FILTER_NEAREST;
-
-    // Identity first: raw Y'CbCr planes keep the pre-matrix signal libplacebo needs for the full
-    // Dolby Vision component reshape; a driver that rejects the identity model on this external
-    // format falls back to its suggested matrix (RGB output, reshape disabled).
-    p->yuv = false;
-    if (fmt->suggestedYcbcrModel >= VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709) {
-        VkSamplerYcbcrConversionCreateInfo id_info = conv_info;
-        id_info.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_IDENTITY;
-        if (vkCreateSamplerYcbcrConversion(p->dev, &id_info, NULL, &p->conv) == VK_SUCCESS)
-            p->yuv = true;
-    }
-    if (!p->yuv &&
-        vkCreateSamplerYcbcrConversion(p->dev, &conv_info, NULL, &p->conv) != VK_SUCCESS) {
+    if (vkCreateSamplerYcbcrConversion(p->dev, &conv_info, NULL, &p->conv)
+            != VK_SUCCESS) {
         MP_ERR(p, "vkCreateSamplerYcbcrConversion failed\n");
         return false;
     }
-    MP_VERBOSE(p, "repack path: %s\n", p->yuv ? "identity YUV planes" : "driver-matrixed RGB");
 
     VkSamplerYcbcrConversionInfo conv_ref = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
@@ -557,8 +532,7 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
         return false;
     }
 
-    uint32_t num_storage = p->yuv ? 3 : 1;
-    VkDescriptorSetLayoutBinding bindings[4] = {
+    VkDescriptorSetLayoutBinding bindings[] = {
         {
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -566,18 +540,16 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
             .pImmutableSamplers = &p->sampler,
         },
-    };
-    for (uint32_t i = 0; i < num_storage; i++) {
-        bindings[1 + i] = (VkDescriptorSetLayoutBinding) {
-            .binding = 1 + i,
+        {
+            .binding = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .descriptorCount = 1,
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-        };
-    }
+        },
+    };
     VkDescriptorSetLayoutCreateInfo dsl_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1 + num_storage,
+        .bindingCount = 2,
         .pBindings = bindings,
     };
     if (vkCreateDescriptorSetLayout(p->dev, &dsl_info, NULL, &p->dsl) != VK_SUCCESS)
@@ -593,9 +565,8 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
 
     VkShaderModuleCreateInfo shader_info = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = p->yuv ? sizeof(aimagereader_vk_yuv_shader_spv)
-                           : sizeof(aimagereader_vk_shader_spv),
-        .pCode = p->yuv ? aimagereader_vk_yuv_shader_spv : aimagereader_vk_shader_spv,
+        .codeSize = sizeof(aimagereader_vk_shader_spv),
+        .pCode = aimagereader_vk_shader_spv,
     };
     VkShaderModule shader;
     if (vkCreateShaderModule(p->dev, &shader_info, NULL, &shader) != VK_SUCCESS)
@@ -621,7 +592,7 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
 
     VkDescriptorPoolSize pool_sizes[] = {
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, num_storage },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
     };
     VkDescriptorPoolCreateInfo dpool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -649,72 +620,57 @@ static bool ensure_output(struct ra_hwdec_mapper *mapper, uint32_t w, uint32_t h
     struct priv *p = mapper->priv;
     struct priv_owner *o = mapper->owner->priv;
 
-    int num_out = p->yuv ? 3 : 1;
-    if (p->out_tex[0] && p->num_out == num_out && p->out_w == w && p->out_h == h)
+    if (p->out_tex && p->out_w == w && p->out_h == h)
         return true;
 
     destroy_output(mapper);
 
-    pl_fmt fmt = pl_find_named_fmt(o->gpu, p->yuv ? "r16" : "rgba16");
+    pl_fmt fmt = pl_find_named_fmt(o->gpu, "rgba16");
     if (!fmt) {
-        MP_ERR(p, "no %s format\n", p->yuv ? "r16" : "rgba16");
+        MP_ERR(p, "no rgba16 format\n");
         return false;
     }
 
-    for (int i = 0; i < num_out; i++) {
-        p->out_tex[i] = pl_tex_create(o->gpu, pl_tex_params(
-            .w = w,
-            .h = h,
-            .format = fmt,
-            .sampleable = true,
-            .storable = true,
-        ));
-        if (!p->out_tex[i]) {
-            MP_ERR(p, "output pl_tex_create failed\n");
-            return false;
-        }
-
-        VkFormat out_format = VK_FORMAT_UNDEFINED;
-        p->out_image[i] = pl_vulkan_unwrap(o->gpu, p->out_tex[i], &out_format, NULL);
-
-        VkImageViewCreateInfo view_info = {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = p->out_image[i],
-            .viewType = VK_IMAGE_VIEW_TYPE_2D,
-            .format = out_format,
-            .subresourceRange = {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .levelCount = 1,
-                .layerCount = 1,
-            },
-        };
-        if (vkCreateImageView(p->dev, &view_info, NULL, &p->out_view[i]) != VK_SUCCESS) {
-            MP_ERR(p, "output view creation failed\n");
-            return false;
-        }
-
-        p->out_ra[i] = talloc_zero(NULL, struct ra_tex);
-        if (!mppl_wrap_tex(mapper->ra, p->out_tex[i], p->out_ra[i])) {
-            MP_ERR(p, "mppl_wrap_tex failed\n");
-            return false;
-        }
+    p->out_tex = pl_tex_create(o->gpu, pl_tex_params(
+        .w = w,
+        .h = h,
+        .format = fmt,
+        .sampleable = true,
+        .storable = true,
+    ));
+    if (!p->out_tex) {
+        MP_ERR(p, "output pl_tex_create failed\n");
+        return false;
     }
 
-    p->num_out = num_out;
+    VkFormat out_format = VK_FORMAT_UNDEFINED;
+    p->out_image = pl_vulkan_unwrap(o->gpu, p->out_tex, &out_format, NULL);
+
+    VkImageViewCreateInfo view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = p->out_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = out_format,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = 1,
+            .layerCount = 1,
+        },
+    };
+    if (vkCreateImageView(p->dev, &view_info, NULL, &p->out_view) != VK_SUCCESS) {
+        MP_ERR(p, "output view creation failed\n");
+        return false;
+    }
+
+    p->out_ra = talloc_zero(NULL, struct ra_tex);
+    if (!mppl_wrap_tex(mapper->ra, p->out_tex, p->out_ra)) {
+        MP_ERR(p, "mppl_wrap_tex failed\n");
+        return false;
+    }
+
     p->out_w = w;
     p->out_h = h;
     return true;
-}
-
-// Maps the driver-suggested ycbcr model to the libplacebo color system of the raw planes.
-static enum pl_color_system map_suggested_model(VkSamplerYcbcrModelConversion model)
-{
-    switch (model) {
-    case VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709: return PL_COLOR_SYSTEM_BT_709;
-    case VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601: return PL_COLOR_SYSTEM_BT_601;
-    case VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_2020: return PL_COLOR_SYSTEM_BT_2020_NC;
-    default: return PL_COLOR_SYSTEM_UNKNOWN;
-    }
 }
 
 static void wait_last_submit(struct priv *p)
@@ -1159,35 +1115,24 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
         return -1;
 
     mapper->dst_params = mapper->src_params;
+    mapper->dst_params.imgfmt = IMGFMT_RGB0;
     mapper->dst_params.hw_subfmt = 0;
-    if (p->yuv) {
-        // Raw pre-matrix planes: libplacebo applies the matrix itself, so the Dolby Vision
-        // component reshape stays valid and repr.dovi is kept as delivered.
-        mapper->dst_params.imgfmt = mp_imgfmt_from_pixfmt(AV_PIX_FMT_YUV444P16);
-        mapper->dst_params.repr.sys = map_suggested_model(p->cur_model);
-        mapper->dst_params.repr.levels =
-            p->cur_range == VK_SAMPLER_YCBCR_RANGE_ITU_FULL
-                ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
-        mapper->dst_params.repr.bits = (struct pl_bit_encoding) {
-            .sample_depth = 16,
-            .color_depth = 16,
-        };
-    } else {
-        // The repack already applied the YCbCr matrix, so the Dolby Vision component reshape
-        // (which operates on the pre-matrix signal) must not run; the dynamic scene brightness
-        // in color.hdr still applies.
-        mapper->dst_params.imgfmt = IMGFMT_RGB0;
-        mapper->dst_params.repr.dovi = NULL;
-    }
-    for (int i = 0; i < 4; i++)
-        mapper->tex[i] = i < p->num_out ? p->out_ra[i] : NULL;
+    // The repack already applied the YCbCr matrix, so the Dolby Vision
+    // component reshape (which operates on the pre-matrix signal) must not
+    // run; the dynamic scene brightness in color.hdr still applies.
+    mapper->dst_params.repr.dovi = NULL;
+    mapper->tex[0] = p->out_ra;
+    mapper->tex[1] = NULL;
 
     VkDescriptorImageInfo in_info = {
         .imageView = p->in_view,
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
-    VkDescriptorImageInfo out_info[3];
-    VkWriteDescriptorSet writes[4] = {
+    VkDescriptorImageInfo out_info = {
+        .imageView = p->out_view,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+    VkWriteDescriptorSet writes[] = {
         {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = p->dset,
@@ -1196,42 +1141,33 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .pImageInfo = &in_info,
         },
-    };
-    for (int i = 0; i < p->num_out; i++) {
-        out_info[i] = (VkDescriptorImageInfo) {
-            .imageView = p->out_view[i],
-            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        };
-        writes[1 + i] = (VkWriteDescriptorSet) {
+        {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = p->dset,
-            .dstBinding = 1 + (uint32_t)i,
+            .dstBinding = 1,
             .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .pImageInfo = &out_info[i],
-        };
-    }
-    vkUpdateDescriptorSets(p->dev, 1 + p->num_out, writes, 0, NULL);
+            .pImageInfo = &out_info,
+        },
+    };
+    vkUpdateDescriptorSets(p->dev, 2, writes, 0, NULL);
 
-    // libplacebo signals each hold value once its pending reads of that output retire; the
-    // compute submit waits the LAST (largest) value — a timeline wait at N covers all <= N —
-    // and signals `signal_value`, which the releases below hand back to libplacebo.
-    uint64_t wait_value = 0;
-    for (int i = 0; i < p->num_out; i++) {
-        wait_value = ++p->tl_value;
-        bool held = pl_vulkan_hold_ex(o->gpu, pl_vulkan_hold_params(
-            .tex = p->out_tex[i],
-            .layout = VK_IMAGE_LAYOUT_GENERAL,
-            .qf = p->qf,
-            .semaphore = (pl_vulkan_sem) {
-                .sem = p->timeline,
-                .value = wait_value,
-            },
-        ));
-        if (!held) {
-            MP_ERR(mapper, "pl_vulkan_hold_ex failed\n");
-            return -1;
-        }
+    // libplacebo signals `wait_value` once its pending reads of the output
+    // texture retire; the compute submit waits on it and signals
+    // `signal_value`, which the release below hands back to libplacebo.
+    uint64_t wait_value = ++p->tl_value;
+    bool held = pl_vulkan_hold_ex(o->gpu, pl_vulkan_hold_params(
+        .tex = p->out_tex,
+        .layout = VK_IMAGE_LAYOUT_GENERAL,
+        .qf = p->qf,
+        .semaphore = (pl_vulkan_sem) {
+            .sem = p->timeline,
+            .value = wait_value,
+        },
+    ));
+    if (!held) {
+        MP_ERR(mapper, "pl_vulkan_hold_ex failed\n");
+        return -1;
     }
 
     vkResetCommandBuffer(p->cmd, 0);
@@ -1253,17 +1189,15 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     if (!submit_work(mapper, wait_value, signal_value, true))
         return -1;
 
-    for (int i = 0; i < p->num_out; i++) {
-        pl_vulkan_release_ex(o->gpu, pl_vulkan_release_params(
-            .tex = p->out_tex[i],
-            .layout = VK_IMAGE_LAYOUT_GENERAL,
-            .qf = p->qf,
-            .semaphore = (pl_vulkan_sem) {
-                .sem = p->timeline,
-                .value = signal_value,
-            },
-        ));
-    }
+    pl_vulkan_release_ex(o->gpu, pl_vulkan_release_params(
+        .tex = p->out_tex,
+        .layout = VK_IMAGE_LAYOUT_GENERAL,
+        .qf = p->qf,
+        .semaphore = (pl_vulkan_sem) {
+            .sem = p->timeline,
+            .value = signal_value,
+        },
+    ));
 
     return 0;
 }
