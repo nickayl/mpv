@@ -1117,6 +1117,10 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     mapper->dst_params = mapper->src_params;
     mapper->dst_params.imgfmt = IMGFMT_RGB0;
     mapper->dst_params.hw_subfmt = 0;
+    // The repack already applied the YCbCr matrix, so the Dolby Vision
+    // component reshape (which operates on the pre-matrix signal) must not
+    // run; the dynamic scene brightness in color.hdr still applies.
+    mapper->dst_params.repr.dovi = NULL;
     mapper->tex[0] = p->out_ra;
     mapper->tex[1] = NULL;
 
