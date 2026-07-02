@@ -1735,6 +1735,12 @@ MPV_EXPORT mpv_event *mpv_wait_event(mpv_handle *ctx, double timeout);
 MPV_EXPORT void mpv_wakeup(mpv_handle *ctx);
 
 /**
+ * Calls av_jni_set_java_vm() with the given JavaVM*, exposing the otherwise
+ * statically-linked libavcodec JNI symbol so mediacodec hardware decode works.
+ */
+MPV_EXPORT int mpv_lavc_set_java_vm(void *vm);
+
+/**
  * Set a custom function that should be called when there are new events. Use
  * this if blocking in mpv_wait_event() to wait for new events is not feasible.
  *

@@ -14,6 +14,8 @@
  */
 
 #include <assert.h>
+
+#include <libavcodec/jni.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -964,6 +966,10 @@ void mpv_wakeup(mpv_handle *ctx)
     ctx->queued_wakeup = true;
     wakeup_client(ctx);
     mp_mutex_unlock(&ctx->lock);
+}
+
+int mpv_lavc_set_java_vm(void *vm) {
+    return av_jni_set_java_vm(vm, NULL);
 }
 
 // map client API types to internal types
