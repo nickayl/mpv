@@ -24,6 +24,11 @@
 #include <stdint.h>
 
 #include <aaudio/AAudio.h>
+#ifndef AAUDIO_FORMAT_IEC61937
+/* Keep older NDK headers compiling while mpv guards use by runtime API level. */
+#define AAUDIO_FORMAT_IEC61937 5
+#endif
+
 #include <android/api-level.h>
 
 #include "ao.h"
