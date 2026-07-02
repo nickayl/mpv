@@ -196,6 +196,10 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
      * of the ffmpeg Vulkan hwcontext and video decoding capability.
      */
     const char *opt_extensions[] = {
+        // Android AHardwareBuffer interop (hwdec_aimagereader_vk); ignored
+        // where unsupported.
+        "VK_ANDROID_external_memory_android_hardware_buffer",
+        "VK_EXT_queue_family_foreign",
 #if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(60, 26, 0)
         VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME,
 #endif

@@ -1409,6 +1409,10 @@ if features['android-media-ndk']
     sources += files('video/out/hwdec/hwdec_aimagereader.c')
 endif
 
+if features['android-media-ndk'] and features['vulkan']
+    sources += files('video/out/hwdec/hwdec_aimagereader_vk.c')
+endif
+
 d3d_hwaccel = get_option('d3d-hwaccel').require(
     win32,
     error_message: 'the os is not win32!',
