@@ -62,6 +62,7 @@
 #include "misc/jni.h"
 #include "osdep/threads.h"
 #include "osdep/timer.h"
+#include "video/fmt-conversion.h"
 #include "video/img_format.h"
 #include "video/out/gpu/hwdec.h"
 #include "video/out/vulkan/context.h"
@@ -1163,7 +1164,7 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     if (p->yuv) {
         // Raw pre-matrix planes: libplacebo applies the matrix itself, so the Dolby Vision
         // component reshape stays valid and repr.dovi is kept as delivered.
-        mapper->dst_params.imgfmt = mp_imgfmt_from_pixfmt(AV_PIX_FMT_YUV444P16);
+        mapper->dst_params.imgfmt = pixfmt2imgfmt(AV_PIX_FMT_YUV444P16);
         mapper->dst_params.repr.sys = map_suggested_model(p->cur_model);
         mapper->dst_params.repr.levels =
             p->cur_range == VK_SAMPLER_YCBCR_RANGE_ITU_FULL
