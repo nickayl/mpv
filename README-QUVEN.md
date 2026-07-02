@@ -5,8 +5,7 @@ This is a public fork of [mpv](https://github.com/mpv-player/mpv) maintained by 
 Quven Android client; publishing the modified sources here satisfies libmpv's LGPL-2.1+ §6 source
 offer.
 
-Everything lives on the branch **`quven/android-vk-interop`**, based on an upstream master
-snapshot (`a3d4b5919`, 2026-07-01). `master` tracks upstream and carries no changes.
+Everything lives on the branch **`quven/android-vk-interop`**, based on upstream master and kept in sync via periodic merges (last: 2026-07-02). `master` tracks upstream and carries no changes.
 
 ## How this fork diverges from upstream
 
