@@ -1,0 +1,20 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(binding = 0) uniform sampler2D source;
+layout(binding = 1, r16) writeonly uniform image2D dest_y;
+layout(binding = 2, r16) writeonly uniform image2D dest_u;
+layout(binding = 3, r16) writeonly uniform image2D dest_v;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dest_y);
+    if (pos.x >= size.x || pos.y >= size.y) return;
+    vec2 uv = (vec2(pos) + 0.5) / vec2(size);
+    // The identity ycbcr sampler returns raw normalized Y'CbCr in .rgb (chroma
+    // reconstructed to luma resolution by the sampler).
+    vec3 yuv = textureLod(source, uv, 0.0).rgb;
+    imageStore(dest_y, pos, vec4(yuv.r, 0.0, 0.0, 1.0));
+    imageStore(dest_u, pos, vec4(yuv.g, 0.0, 0.0, 1.0));
+    imageStore(dest_v, pos, vec4(yuv.b, 0.0, 0.0, 1.0));
+}
