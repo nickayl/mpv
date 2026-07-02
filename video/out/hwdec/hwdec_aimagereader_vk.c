@@ -22,15 +22,24 @@
 /*
  * The MediaCodec decoder renders into an AImageReader surface (same flow as
  * hwdec_aimagereader.c). Each frame's AHardwareBuffer is imported into a
- * VkImage. Many Android drivers (e.g. Samsung Xclipse) expose decoder buffers
- * only as opaque "external formats" that can solely be sampled through a
- * VkSamplerYcbcrConversion, which libplacebo cannot consume directly, so a
- * small compute pass samples the imported image once (the driver conversion
- * yields RGB) into an owned RGBA16 storage image that is handed to libplacebo
- * as the frame texture. This keeps the whole path on the GPU (no CPU
- * copy-back like mediacodec-copy). Mirroring the GL interop, the result is
- * treated as IMGFMT_RGB0 and the YCbCr matrix/range applied are the ones the
- * driver suggests for the buffer.
+ * VkImage, then one of two paths applies:
+ *
+ * - Direct: when the driver reports a standard multiplanar format for the
+ *   buffer, the planes are wrapped as libplacebo textures directly and the
+ *   frame stays true YUV (NV12 / P010).
+ *
+ * - Repack: drivers such as Samsung Xclipse expose decoder buffers only as
+ *   opaque "external formats" that can solely be sampled through a
+ *   VkSamplerYcbcrConversion, which libplacebo cannot consume, so a small
+ *   compute pass samples the imported image once (the driver conversion
+ *   yields RGB) into an owned RGBA16 storage image. Mirroring the GL interop,
+ *   the result is treated as IMGFMT_RGB0 with the driver-suggested
+ *   matrix/range applied.
+ *
+ * Both paths keep everything on the GPU (no CPU copy-back like
+ * mediacodec-copy). The AImageReader acquire fence is imported as a temporary
+ * binary semaphore when VK_KHR_external_semaphore_fd is available (bounded
+ * CPU poll otherwise).
  */
 
 #include <assert.h>
@@ -61,6 +70,7 @@
 
 #define AHB_VK_EXTENSION "VK_ANDROID_external_memory_android_hardware_buffer"
 #define FOREIGN_VK_EXTENSION "VK_EXT_queue_family_foreign"
+#define SEM_FD_VK_EXTENSION "VK_KHR_external_semaphore_fd"
 
 struct priv_owner {
     struct mp_hwdec_ctx hwctx;
@@ -71,6 +81,7 @@ struct priv_owner {
     pl_gpu gpu;
     pl_vulkan vk;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_ahb_props;
+    PFN_vkImportSemaphoreFdKHR import_sem_fd;
     uint32_t external_qf;   // VK_QUEUE_FAMILY_FOREIGN_EXT when available
 
     media_status_t (*AImageReader_newWithUsage)(
@@ -107,8 +118,13 @@ struct priv {
     VkSemaphore timeline;
     uint64_t tl_value;         // last timeline value allocated
     uint64_t last_submit;      // timeline value signaled by our last submit
+    VkSemaphore acquire_sem;   // temporary import target for acquire fences
+    bool wait_acquire;         // acquire_sem holds a payload for this frame
 
-    // Recreated when the buffer's (external) format changes.
+    // Path choice, decided per buffer format.
+    bool direct;
+
+    // Repack path state, recreated when the buffer's format changes.
     uint64_t cur_external_format;
     VkFormat cur_format;
     VkSamplerYcbcrModelConversion cur_model;
@@ -126,7 +142,10 @@ struct priv {
     VkDeviceMemory in_mem, prev_in_mem;
     VkImageView in_view, prev_in_view;
 
-    // Owned output image the compute pass writes and libplacebo samples.
+    // Direct path: per-frame plane wrappers, freed one frame late.
+    struct ra_tex *plane_ra[2], *prev_plane_ra[2];
+
+    // Repack path: owned output image the compute pass writes.
     pl_tex out_tex;
     struct ra_tex *out_ra;
     VkImage out_image;
@@ -201,12 +220,14 @@ static int init(struct ra_hwdec *hw)
     if (!p->vk)
         return -1;
 
-    bool have_ahb = false, have_foreign = false;
+    bool have_ahb = false, have_foreign = false, have_sem_fd = false;
     for (int i = 0; i < p->vk->num_extensions; i++) {
         if (strcmp(p->vk->extensions[i], AHB_VK_EXTENSION) == 0)
             have_ahb = true;
         if (strcmp(p->vk->extensions[i], FOREIGN_VK_EXTENSION) == 0)
             have_foreign = true;
+        if (strcmp(p->vk->extensions[i], SEM_FD_VK_EXTENSION) == 0)
+            have_sem_fd = true;
     }
     if (!have_ahb) {
         MP_MSG(hw, level, "Device lacks %s\n", AHB_VK_EXTENSION);
@@ -220,6 +241,10 @@ static int init(struct ra_hwdec *hw)
     if (get_dev_proc) {
         p->get_ahb_props = (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)
             get_dev_proc(p->vk->device, "vkGetAndroidHardwareBufferPropertiesANDROID");
+        if (have_sem_fd) {
+            p->import_sem_fd = (PFN_vkImportSemaphoreFdKHR)
+                get_dev_proc(p->vk->device, "vkImportSemaphoreFdKHR");
+        }
     }
     if (!p->get_ahb_props) {
         MP_MSG(hw, level, "vkGetAndroidHardwareBufferPropertiesANDROID unavailable\n");
@@ -266,7 +291,8 @@ static int init(struct ra_hwdec *hw)
 
     hwdec_devices_add(hw->devs, &p->hwctx);
 
-    MP_VERBOSE(hw, "Using the Vulkan AImageReader interop\n");
+    MP_VERBOSE(hw, "Using the Vulkan AImageReader interop (fence import: %s)\n",
+               p->import_sem_fd ? "semaphore" : "cpu poll");
     return 0;
 }
 
@@ -320,8 +346,8 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
     };
     o->AImageReader_setImageListener(o->reader, &listener);
 
-    // The driver's YCbCr conversion emits RGB, matching the GL interop's
-    // external-OES semantics.
+    // Refined per frame once the buffer format is known (direct YUV planes or
+    // repacked RGB0).
     mapper->dst_params = mapper->src_params;
     mapper->dst_params.imgfmt = IMGFMT_RGB0;
     mapper->dst_params.hw_subfmt = 0;
@@ -358,6 +384,14 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
     };
     if (vkCreateSemaphore(p->dev, &sem_info, NULL, &p->timeline) != VK_SUCCESS)
         return -1;
+
+    if (o->import_sem_fd) {
+        VkSemaphoreCreateInfo bin_info = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        };
+        if (vkCreateSemaphore(p->dev, &bin_info, NULL, &p->acquire_sem) != VK_SUCCESS)
+            return -1;
+    }
 
     return 0;
 }
@@ -405,6 +439,15 @@ static void destroy_input(struct priv *p, VkImageView *view, VkImage *image,
     if (*mem) {
         vkFreeMemory(p->dev, *mem, NULL);
         *mem = VK_NULL_HANDLE;
+    }
+}
+
+static void free_plane_wrappers(struct ra_hwdec_mapper *mapper,
+                                struct ra_tex **planes)
+{
+    for (int i = 0; i < 2; i++) {
+        if (planes[i])
+            ra_tex_free(mapper->ra, &planes[i]);
     }
 }
 
@@ -627,7 +670,6 @@ static bool ensure_output(struct ra_hwdec_mapper *mapper, uint32_t w, uint32_t h
 
     p->out_w = w;
     p->out_h = h;
-    mapper->tex[0] = p->out_ra;
     return true;
 }
 
@@ -654,11 +696,15 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     if (p->dev) {
         wait_last_submit(p);
 
+        free_plane_wrappers(mapper, p->prev_plane_ra);
+        free_plane_wrappers(mapper, p->plane_ra);
         destroy_input(p, &p->prev_in_view, &p->prev_in_image, &p->prev_in_mem);
         destroy_input(p, &p->in_view, &p->in_image, &p->in_mem);
         destroy_format_objects(p);
         destroy_output(mapper);
 
+        if (p->acquire_sem)
+            vkDestroySemaphore(p->dev, p->acquire_sem, NULL);
         if (p->timeline)
             vkDestroySemaphore(p->dev, p->timeline, NULL);
         if (p->cmd_pool)
@@ -679,13 +725,13 @@ static void mapper_unmap(struct ra_hwdec_mapper *mapper)
 {
     // Teardown is deferred to the next map (or uninit): Vulkan has no
     // implicit sync, so the frame's input image and AImage stay alive until
-    // the timeline semaphore proves the compute pass consumed them.
+    // the timeline semaphore proves the GPU consumed them.
 }
 
 static bool import_input(struct ra_hwdec_mapper *mapper, AHardwareBuffer *hwbuf,
     const VkAndroidHardwareBufferPropertiesANDROID *props,
     const VkAndroidHardwareBufferFormatPropertiesANDROID *fmt,
-    uint32_t w, uint32_t h)
+    uint32_t w, uint32_t h, bool with_view)
 {
     struct priv *p = mapper->priv;
 
@@ -753,6 +799,9 @@ static bool import_input(struct ra_hwdec_mapper *mapper, AHardwareBuffer *hwbuf,
         return false;
     }
 
+    if (!with_view)
+        return true;
+
     VkSamplerYcbcrConversionInfo conv_ref = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
         .conversion = p->conv,
@@ -777,11 +826,172 @@ static bool import_input(struct ra_hwdec_mapper *mapper, AHardwareBuffer *hwbuf,
     return true;
 }
 
+// Submits the recorded acquire barrier (+ optional dispatch), waiting on the
+// libplacebo hand-off value and the imported acquire fence, signaling
+// `signal_value`.
+static bool submit_work(struct ra_hwdec_mapper *mapper, uint64_t wait_value,
+                        uint64_t signal_value, bool wait_pl)
+{
+    struct priv *p = mapper->priv;
+    struct priv_owner *o = mapper->owner->priv;
+
+    VkSemaphore wait_sems[2];
+    uint64_t wait_values[2];
+    VkPipelineStageFlags wait_stages[2];
+    uint32_t num_waits = 0;
+
+    if (wait_pl) {
+        wait_sems[num_waits] = p->timeline;
+        wait_values[num_waits] = wait_value;
+        wait_stages[num_waits] = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        num_waits++;
+    }
+    if (p->wait_acquire) {
+        wait_sems[num_waits] = p->acquire_sem;
+        wait_values[num_waits] = 0;
+        wait_stages[num_waits] = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        num_waits++;
+        p->wait_acquire = false;
+    }
+
+    VkTimelineSemaphoreSubmitInfo tl_submit = {
+        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        .waitSemaphoreValueCount = num_waits,
+        .pWaitSemaphoreValues = wait_values,
+        .signalSemaphoreValueCount = 1,
+        .pSignalSemaphoreValues = &signal_value,
+    };
+    VkSubmitInfo submit = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = &tl_submit,
+        .waitSemaphoreCount = num_waits,
+        .pWaitSemaphores = wait_sems,
+        .pWaitDstStageMask = wait_stages,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &p->cmd,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &p->timeline,
+    };
+    o->vk->lock_queue(o->vk, p->qf, 0);
+    VkResult res = vkQueueSubmit(p->queue, 1, &submit, VK_NULL_HANDLE);
+    o->vk->unlock_queue(o->vk, p->qf, 0);
+    if (res != VK_SUCCESS) {
+        MP_ERR(mapper, "vkQueueSubmit failed: %d\n", res);
+        return false;
+    }
+    p->last_submit = signal_value;
+    return true;
+}
+
+static void record_acquire_barrier(struct priv *p, uint32_t external_qf,
+                                   VkImageLayout new_layout,
+                                   VkPipelineStageFlags dst_stage)
+{
+    VkImageMemoryBarrier acquire = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = new_layout,
+        .srcQueueFamilyIndex = external_qf,
+        .dstQueueFamilyIndex = p->qf,
+        .image = p->in_image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = 1,
+            .layerCount = 1,
+        },
+    };
+    vkCmdPipelineBarrier(p->cmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, dst_stage,
+        0, 0, NULL, 0, NULL, 1, &acquire);
+}
+
+// UNTESTED on external-format-only drivers' counterpart hardware: wraps the
+// two planes of a standard multiplanar decoder buffer directly as libplacebo
+// textures (true YUV, no repack). Falls back to the repack path on failure.
+static bool map_direct(struct ra_hwdec_mapper *mapper,
+    const VkAndroidHardwareBufferFormatPropertiesANDROID *fmt,
+    uint32_t w, uint32_t h)
+{
+    struct priv *p = mapper->priv;
+    struct priv_owner *o = mapper->owner->priv;
+
+    bool p010 = fmt->format == VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+    VkFormat plane_fmts[2] = {
+        p010 ? VK_FORMAT_R10X6_UNORM_PACK16 : VK_FORMAT_R8_UNORM,
+        p010 ? VK_FORMAT_R10X6G10X6_UNORM_2PACK16 : VK_FORMAT_R8G8_UNORM,
+    };
+    VkImageAspectFlags aspects[2] = {
+        VK_IMAGE_ASPECT_PLANE_0_BIT,
+        VK_IMAGE_ASPECT_PLANE_1_BIT,
+    };
+
+    pl_tex planes[2] = {0};
+    for (int i = 0; i < 2; i++) {
+        planes[i] = pl_vulkan_wrap(o->gpu, pl_vulkan_wrap_params(
+            .image = p->in_image,
+            .aspect = aspects[i],
+            .width = i ? (w + 1) / 2 : w,
+            .height = i ? (h + 1) / 2 : h,
+            .format = plane_fmts[i],
+            .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+        ));
+        if (!planes[i]) {
+            MP_WARN(mapper, "direct plane wrap failed, using repack\n");
+            for (int j = 0; j < i; j++)
+                pl_tex_destroy(o->gpu, &planes[j]);
+            return false;
+        }
+    }
+
+    vkResetCommandBuffer(p->cmd, 0);
+    VkCommandBufferBeginInfo begin = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    vkBeginCommandBuffer(p->cmd, &begin);
+    record_acquire_barrier(p, o->external_qf,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    vkEndCommandBuffer(p->cmd);
+
+    uint64_t signal_value = ++p->tl_value;
+    if (!submit_work(mapper, 0, signal_value, false)) {
+        for (int i = 0; i < 2; i++)
+            pl_tex_destroy(o->gpu, &planes[i]);
+        return false;
+    }
+
+    for (int i = 0; i < 2; i++) {
+        pl_vulkan_release_ex(o->gpu, pl_vulkan_release_params(
+            .tex = planes[i],
+            .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .qf = p->qf,
+            .semaphore = (pl_vulkan_sem) {
+                .sem = p->timeline,
+                .value = signal_value,
+            },
+        ));
+        p->plane_ra[i] = talloc_zero(NULL, struct ra_tex);
+        if (!mppl_wrap_tex(mapper->ra, planes[i], p->plane_ra[i])) {
+            MP_ERR(mapper, "mppl_wrap_tex(plane %d) failed\n", i);
+            return false;
+        }
+        mapper->tex[i] = p->plane_ra[i];
+    }
+
+    mapper->dst_params = mapper->src_params;
+    mapper->dst_params.imgfmt = p010 ? IMGFMT_P010 : IMGFMT_NV12;
+    mapper->dst_params.hw_subfmt = 0;
+    return true;
+}
+
 static int mapper_map(struct ra_hwdec_mapper *mapper)
 {
     struct priv *p = mapper->priv;
     struct priv_owner *o = mapper->owner->priv;
-    pl_vulkan vk = o->vk;
 
     {
         if (mapper->src->imgfmt != IMGFMT_MEDIACODEC)
@@ -803,6 +1013,7 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
 
     // Our previous submit provably retired before its resources are touched.
     wait_last_submit(p);
+    free_plane_wrappers(mapper, p->prev_plane_ra);
     destroy_input(p, &p->prev_in_view, &p->prev_in_image, &p->prev_in_mem);
     if (p->prev_image) {
         o->AImage_delete(p->prev_image);
@@ -824,6 +1035,20 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
         return image_available ? -1 : 0;
     }
 
+    p->wait_acquire = false;
+    if (fence_fd >= 0 && o->import_sem_fd && p->acquire_sem) {
+        VkImportSemaphoreFdInfoKHR sem_import = {
+            .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+            .semaphore = p->acquire_sem,
+            .flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
+            .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+            .fd = fence_fd,
+        };
+        if (o->import_sem_fd(p->dev, &sem_import) == VK_SUCCESS) {
+            p->wait_acquire = true;
+            fence_fd = -1;  // ownership transferred to the semaphore
+        }
+    }
     if (fence_fd >= 0) {
         struct pollfd pfd = { .fd = fence_fd, .events = POLLIN };
         poll(&pfd, 1, 100);
@@ -831,6 +1056,8 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     }
 
     p->prev_image = p->image;
+    memcpy(p->prev_plane_ra, p->plane_ra, sizeof(p->plane_ra));
+    memset(p->plane_ra, 0, sizeof(p->plane_ra));
     p->prev_in_view = p->in_view;
     p->prev_in_image = p->in_image;
     p->prev_in_mem = p->in_mem;
@@ -861,12 +1088,37 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
         return -1;
     }
 
+    bool try_direct =
+        fmt.format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM ||
+        fmt.format == VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+
+    if (try_direct) {
+        if (!import_input(mapper, hwbuf, &props, &fmt, desc.width, desc.height,
+                          false))
+            return -1;
+        if (map_direct(mapper, &fmt, desc.width, desc.height)) {
+            if (!p->direct)
+                MP_VERBOSE(mapper, "using the direct multiplanar path\n");
+            p->direct = true;
+            return 0;
+        }
+        // Wrap failed: rebuild the input with a ycbcr view and repack.
+        destroy_input(p, &p->in_view, &p->in_image, &p->in_mem);
+    }
+    p->direct = false;
+
     if (!ensure_format_objects(mapper, &fmt))
         return -1;
     if (!ensure_output(mapper, desc.width, desc.height))
         return -1;
-    if (!import_input(mapper, hwbuf, &props, &fmt, desc.width, desc.height))
+    if (!import_input(mapper, hwbuf, &props, &fmt, desc.width, desc.height, true))
         return -1;
+
+    mapper->dst_params = mapper->src_params;
+    mapper->dst_params.imgfmt = IMGFMT_RGB0;
+    mapper->dst_params.hw_subfmt = 0;
+    mapper->tex[0] = p->out_ra;
+    mapper->tex[1] = NULL;
 
     VkDescriptorImageInfo in_info = {
         .imageView = p->in_view,
@@ -920,62 +1172,18 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     vkBeginCommandBuffer(p->cmd, &begin);
-
-    VkImageMemoryBarrier acquire = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = 0,
-        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        .srcQueueFamilyIndex = o->external_qf,
-        .dstQueueFamilyIndex = p->qf,
-        .image = p->in_image,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .levelCount = 1,
-            .layerCount = 1,
-        },
-    };
-    vkCmdPipelineBarrier(p->cmd,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0, 0, NULL, 0, NULL, 1, &acquire);
-
+    record_acquire_barrier(p, o->external_qf,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     vkCmdBindPipeline(p->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p->pipe);
     vkCmdBindDescriptorSets(p->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p->pll,
                             0, 1, &p->dset, 0, NULL);
     vkCmdDispatch(p->cmd, (desc.width + 7) / 8, (desc.height + 7) / 8, 1);
-
     vkEndCommandBuffer(p->cmd);
 
     uint64_t signal_value = ++p->tl_value;
-    VkTimelineSemaphoreSubmitInfo tl_submit = {
-        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-        .waitSemaphoreValueCount = 1,
-        .pWaitSemaphoreValues = &wait_value,
-        .signalSemaphoreValueCount = 1,
-        .pSignalSemaphoreValues = &signal_value,
-    };
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    VkSubmitInfo submit = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .pNext = &tl_submit,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &p->timeline,
-        .pWaitDstStageMask = &wait_stage,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &p->cmd,
-        .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &p->timeline,
-    };
-    vk->lock_queue(vk, p->qf, 0);
-    VkResult sres = vkQueueSubmit(p->queue, 1, &submit, VK_NULL_HANDLE);
-    vk->unlock_queue(vk, p->qf, 0);
-    if (sres != VK_SUCCESS) {
-        MP_ERR(mapper, "vkQueueSubmit failed: %d\n", sres);
+    if (!submit_work(mapper, wait_value, signal_value, true))
         return -1;
-    }
-    p->last_submit = signal_value;
 
     pl_vulkan_release_ex(o->gpu, pl_vulkan_release_params(
         .tex = p->out_tex,

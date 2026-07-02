@@ -200,6 +200,7 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
         // where unsupported.
         "VK_ANDROID_external_memory_android_hardware_buffer",
         "VK_EXT_queue_family_foreign",
+        "VK_KHR_external_semaphore_fd",
 #if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(60, 26, 0)
         VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME,
 #endif
