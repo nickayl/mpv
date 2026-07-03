@@ -55,11 +55,11 @@ static void metal_uninit(struct ra_ctx *ctx)
 
     if (ctx->ra) {
         pl_gpu_finish(mtl->gpu);
-        pl_swapchain_destroy(&mtl->swapchain);
         ctx->ra->fns->destroy(ctx->ra);
         ctx->ra = NULL;
     }
 
+    pl_swapchain_destroy(&mtl->swapchain);
     pl_mtl_destroy(&mtl->mtl);
     pl_log_destroy(&mtl->pllog);
 
