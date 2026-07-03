@@ -1559,7 +1559,7 @@ features += {'videotoolbox-gl': videotoolbox_gl.allowed()}
 corevideo = dependency('appleframeworks', modules: ['CoreVideo'], required:
     get_option('videotoolbox-pl').require(darwin))
 videotoolbox_pl = get_option('videotoolbox-pl').require(
-    features['vulkan'] and corevideo.found(),
+    (features['vulkan'] or features['metal']) and corevideo.found(),
     error_message: 'vulkan or CV metal support could be found!',
 )
 features += {'videotoolbox-pl': videotoolbox_pl.allowed()}

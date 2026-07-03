@@ -38,6 +38,10 @@
 #include "video/out/vulkan/common.h"
 #endif
 
+#ifdef PL_HAVE_METAL
+#include <libplacebo/metal.h>
+#endif
+
 #include "hwdec_vt.h"
 
 static bool check_hwdec(const struct ra_hwdec *hw)
@@ -84,9 +88,19 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
 
     id<MTLDevice> mtl_device = nil;
 
+#ifdef PL_HAVE_METAL
+    if (!mtl_device) {
+        pl_mtl mtl = pl_mtl_get(ra_pl_get(mapper->ra));
+        if (mtl) {
+            mtl_device = mtl->device;
+            [mtl_device retain];
+        }
+    }
+#endif
+
 #ifdef VK_EXT_METAL_OBJECTS_SPEC_VERSION
     pl_gpu gpu = ra_pl_get(mapper->ra);
-    if (gpu) {
+    if (!mtl_device && gpu) {
         pl_vulkan vulkan = pl_vulkan_get(gpu);
         if (vulkan && vulkan->device && vulkan->instance && vulkan->get_proc_addr) {
             PFN_vkExportMetalObjectsEXT pExportMetalObjects = (PFN_vkExportMetalObjectsEXT)vulkan->get_proc_addr(vulkan->instance, "vkExportMetalObjectsEXT");
