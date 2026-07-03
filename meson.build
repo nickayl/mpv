@@ -1365,6 +1365,19 @@ if features['vk-khr-display']
     sources += files('video/out/vulkan/context_display.c')
 endif
 
+metal_opt = get_option('metal').require(darwin, error_message: 'Metal requires an Apple platform')
+if metal_opt.allowed()
+    metal_opt = metal_opt.require(
+        libplacebo.get_variable(pkgconfig: 'pl_has_metal', internal: 'pl_has_metal', default_value: '0') == '1',
+        error_message: 'libplacebo was built without Metal support',
+    )
+endif
+features += {'metal': metal_opt.allowed()}
+if features['metal']
+    dependencies += dependency('appleframeworks', modules: ['Metal', 'QuartzCore'])
+    sources += files('video/out/metal/context.m')
+endif
+
 if features['vulkan'] or (features['gl'] and features['egl'])
     sources += files('video/filter/vf_gpu.c')
 endif

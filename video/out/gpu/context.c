@@ -54,6 +54,9 @@ extern const struct ra_ctx_fns ra_ctx_vulkan_mac;
 /* Direct3D 11 */
 extern const struct ra_ctx_fns ra_ctx_d3d11;
 
+/* Metal */
+extern const struct ra_ctx_fns ra_ctx_metal;
+
 /* No API */
 extern const struct ra_ctx_fns ra_ctx_wldmabuf;
 
@@ -80,6 +83,11 @@ static const struct ra_ctx_fns *const contexts[] = {
 // Direct3D contexts:
 #if HAVE_D3D11
     &ra_ctx_d3d11,
+#endif
+
+// Metal contexts:
+#if HAVE_METAL
+    &ra_ctx_metal,
 #endif
 
 // Vulkan contexts:

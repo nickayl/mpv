@@ -50,6 +50,10 @@
 #include "video/out/vulkan/context.h"
 #endif
 
+#if HAVE_METAL
+#include "video/out/metal/context.h"
+#endif
+
 #if HAVE_D3D11
 static bool d3d11_pl_init(struct vo *vo, struct gpu_ctx *ctx,
                           struct ra_ctx_opts *ctx_opts)
@@ -120,6 +124,16 @@ struct gpu_ctx *gpu_ctx_create(struct vo *vo, struct ra_ctx_opts *ctx_opts)
         ctx->pllog = vkctx->pllog;
         ctx->gpu = vkctx->gpu;
         ctx->swapchain = vkctx->swapchain;
+        return ctx;
+    }
+#endif
+
+#if HAVE_METAL
+    struct mpmtl_ctx *mtlctx = ra_mtl_ctx_get(ctx->ra_ctx);
+    if (mtlctx) {
+        ctx->pllog = mtlctx->pllog;
+        ctx->gpu = mtlctx->gpu;
+        ctx->swapchain = mtlctx->swapchain;
         return ctx;
     }
 #endif
@@ -203,6 +217,12 @@ void gpu_ctx_destroy(struct gpu_ctx **ctxp)
     if (ra_vk_ctx_get(ctx->ra_ctx))
         // vulkan RA context handles pl cleanup by itself,
         // skip common local clean-up.
+        goto skip_common_pl_cleanup;
+#endif
+
+#if HAVE_METAL
+    if (ra_mtl_ctx_get(ctx->ra_ctx))
+        // same for the metal RA context
         goto skip_common_pl_cleanup;
 #endif
 

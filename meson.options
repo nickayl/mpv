@@ -91,6 +91,7 @@ option('vaapi-drm', type: 'feature', value: 'auto', description: 'VAAPI (DRM sup
 option('vaapi-wayland', type: 'feature', value: 'auto', description: 'VAAPI (Wayland support)')
 option('vaapi-win32', type: 'feature', value: 'auto', description: 'VAAPI (Windows support)')
 option('vaapi-x11', type: 'feature', value: 'auto', description: 'VAAPI (X11 support)')
+option('metal', type: 'feature', value: 'auto', description: 'Metal context support (via libplacebo)')
 option('vulkan', type: 'feature', value: 'auto', description: 'Vulkan context support')
 option('wayland', type: 'feature', value: 'auto', description: 'Wayland')
 option('x11', type: 'feature', value: 'auto', description: 'X11')
