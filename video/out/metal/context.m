@@ -21,6 +21,7 @@
 
 #include "common/msg.h"
 #include "options/options.h"
+#include "sub/osd.h"
 #include "video/out/vo.h"
 #include "video/out/gpu/context.h"
 #include "video/out/placebo/ra_pl.h"
