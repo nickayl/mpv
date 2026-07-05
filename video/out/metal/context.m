@@ -79,6 +79,14 @@ static bool metal_init(struct ra_ctx *ctx)
     }
 
     p->layer = (__bridge CAMetalLayer *)(intptr_t)ctx->vo->opts->WinID;
+    if (![p->layer isKindOfClass:[CAMetalLayer class]]) {
+        MP_MSG(ctx, msgl, "WinID %lld does not reference a CAMetalLayer\n",
+               (long long)ctx->vo->opts->WinID);
+        goto fail;
+    }
+    MP_VERBOSE(ctx, "metal: bound CAMetalLayer %p (drawableSize %dx%d, scale %.2f)\n",
+               (void *)p->layer, (int)p->layer.drawableSize.width,
+               (int)p->layer.drawableSize.height, (double)p->layer.contentsScale);
 
     mtl->pllog = mppl_log_create(ctx, ctx->log);
     if (!mtl->pllog)
@@ -125,8 +133,18 @@ static bool metal_reconfig(struct ra_ctx *ctx)
     CGSize size = p->layer.drawableSize;
     int w = size.width, h = size.height;
 
-    if (!pl_swapchain_resize(p->mtl.swapchain, &w, &h))
+    if (w <= 0 || h <= 0) {
+        MP_WARN(ctx, "metal: ignoring reconfig to an empty drawable size %dx%d\n", w, h);
         return false;
+    }
+
+    if (!pl_swapchain_resize(p->mtl.swapchain, &w, &h)) {
+        MP_ERR(ctx, "metal: pl_swapchain_resize to %dx%d failed\n", (int)size.width, (int)size.height);
+        return false;
+    }
+
+    if (w != ctx->vo->dwidth || h != ctx->vo->dheight)
+        MP_VERBOSE(ctx, "metal: reconfigure %dx%d -> %dx%d\n", ctx->vo->dwidth, ctx->vo->dheight, w, h);
 
     ctx->vo->dwidth = w;
     ctx->vo->dheight = h;
@@ -135,6 +153,28 @@ static bool metal_reconfig(struct ra_ctx *ctx)
 
 static int metal_control(struct ra_ctx *ctx, int *events, int request, void *arg)
 {
+    struct priv *p = ctx->priv;
+
+    switch (request) {
+    case VOCTRL_CHECK_EVENTS: {
+        // UIKit resizes the CAMetalLayer out-of-band (device rotation, fullscreen) and never tells
+        // mpv, so poll the drawable size each VO iteration: when it changes, run a full reconfig and
+        // raise VO_EVENT_RESIZE. Without this gpu-next keeps placing the video at the stale
+        // dwidth/dheight and renders it into a corner of the resized surface.
+        @autoreleasepool {
+            const CGSize size = p->layer.drawableSize;
+            const int w = size.width, h = size.height;
+            if (w > 0 && h > 0 && (w != ctx->vo->dwidth || h != ctx->vo->dheight)) {
+                MP_VERBOSE(ctx, "metal: drawable resized to %dx%d (was %dx%d)\n",
+                           w, h, ctx->vo->dwidth, ctx->vo->dheight);
+                if (metal_reconfig(ctx))
+                    *events |= VO_EVENT_RESIZE;
+            }
+        }
+        return VO_TRUE;
+    }
+    }
+
     return VO_NOTIMPL;
 }
 
@@ -149,8 +189,10 @@ static bool start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)
 
     if (!pl_swapchain_start_frame(p->mtl.swapchain, &frame))
         return false;
-    if (!mppl_wrap_tex(sw->ctx->ra, frame.fbo, &p->proxy_tex))
+    if (!mppl_wrap_tex(sw->ctx->ra, frame.fbo, &p->proxy_tex)) {
+        MP_ERR(sw->ctx, "metal: failed wrapping the swapchain framebuffer\n");
         return false;
+    }
 
     *out_fbo = (struct ra_fbo) {
         .tex = &p->proxy_tex,
