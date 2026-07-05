@@ -71,6 +71,11 @@ typedef struct mp_vo_opts {
 
     int64_t WinID;
 
+    // Optional per-frame mirror hook for the Metal gpu-context (see --metal-frame-mirror-cb):
+    // a pl_mtl_frame_cb function pointer + its priv pointer, passed as int64 like --wid.
+    int64_t metal_frame_mirror_cb;
+    int64_t metal_frame_mirror_priv;
+
     float force_monitor_aspect;
     float monitor_pixel_aspect;
     bool force_render;

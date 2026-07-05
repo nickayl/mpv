@@ -176,6 +176,8 @@ static const m_option_t mp_vo_opt_list[] = {
         {"no", 0}, {"yes", 1}, {"downscale-big", 2})},
     {"video-recenter", OPT_BOOL(recenter)},
     {"wid", OPT_INT64(WinID), .flags = UPDATE_VO},
+    {"metal-frame-mirror-cb", OPT_INT64(metal_frame_mirror_cb), .flags = UPDATE_VO},
+    {"metal-frame-mirror-priv", OPT_INT64(metal_frame_mirror_priv), .flags = UPDATE_VO},
     {"screen", OPT_CHOICE(screen_id, {"default", -1}), M_RANGE(0, 32)},
     {"screen-name", OPT_STRING(screen_name)},
     {"fs-screen", OPT_CHOICE(fsscreen_id, {"all", -2}, {"current", -1}),

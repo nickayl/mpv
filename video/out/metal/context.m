@@ -103,8 +103,19 @@ static bool metal_init(struct ra_ctx *ctx)
     mtl->gpu = mtl->mtl->gpu;
     mppl_log_set_probing(mtl->pllog, false);
 
+    // Optional per-frame mirror hook (--metal-frame-mirror-cb/-priv, pointers passed as int64
+    // like --wid): forwards each presented frame's IOSurface to the host, e.g. for feeding an
+    // AVSampleBufferDisplayLayer (Picture in Picture / AirPlay). Off (0) by default.
+    pl_mtl_frame_cb frame_cb =
+        (pl_mtl_frame_cb)(intptr_t)ctx->vo->opts->metal_frame_mirror_cb;
+    void *frame_cb_priv = (void *)(intptr_t)ctx->vo->opts->metal_frame_mirror_priv;
+    if (frame_cb)
+        MP_VERBOSE(ctx, "metal: per-frame mirror callback enabled\n");
+
     mtl->swapchain = pl_mtl_create_swapchain(mtl->mtl, pl_mtl_swapchain_params(
         .layer = p->layer,
+        .frame_callback = frame_cb,
+        .frame_callback_priv = frame_cb_priv,
     ));
     if (!mtl->swapchain) {
         MP_MSG(ctx, msgl, "Failed creating Metal swapchain\n");
