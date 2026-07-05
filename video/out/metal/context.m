@@ -194,6 +194,17 @@ static bool start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)
     struct priv *p = sw->priv;
     struct pl_swapchain_frame frame;
 
+    // Keep the frame mirror cropped to the video rect (--metal-frame-mirror-cb): the mirrored
+    // frames then carry the video, not the letterbox bars. vo_get_src_dst_rects is the same
+    // placement computation vo_gpu_next renders with (aspect override, pan/scan, alignment).
+    if (sw->ctx->vo->opts->metal_frame_mirror_cb && sw->ctx->vo->params) {
+        struct mp_rect src, dst;
+        struct mp_osd_res osd;
+        vo_get_src_dst_rects(sw->ctx->vo, &src, &dst, &osd);
+        pl_mtl_swapchain_set_frame_mirror_crop(p->mtl.swapchain,
+            dst.x0, dst.y0, mp_rect_w(dst), mp_rect_h(dst));
+    }
+
     // If out_fbo is NULL, this was called from vo_gpu_next. Bail out.
     if (out_fbo == NULL)
         return true;
