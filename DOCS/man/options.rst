@@ -3810,6 +3810,15 @@ Window
         To prevent this from happening, set a static desktop wallpaper,
         such as single image or pure color.
 
+``--metal-frame-mirror-cb=<int64>``, ``--metal-frame-mirror-priv=<int64>``
+    For use by libmpv embedders only. Callback invoked by the Metal
+    gpu-context with each presented frame, and its opaque argument, passed
+    as raw pointer values cast to ``int64`` like ``--wid``. The callback
+    must match the ``pl_mtl_frame_cb`` signature from libplacebo's
+    ``metal.h``, which documents the invocation contract.
+
+    (macOS/iOS with ``--gpu-context=metal`` only.)
+
 ``--window-dragging=<yes|no>``
     Move the window when clicking on it and moving the mouse pointer (default: yes).
 
