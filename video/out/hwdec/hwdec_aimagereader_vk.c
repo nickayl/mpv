@@ -191,8 +191,10 @@ static AVBufferRef *create_mediacodec_device_ref(jobject surface)
 static bool load_lib_functions(struct priv_owner *p, struct mp_log *log)
 {
     p->lib_handle = dlopen("libmediandk.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!p->lib_handle)
+    if (!p->lib_handle) {
+        mp_warn(log, "Could not open libmediandk.so: %s\n", dlerror());
         return false;
+    }
     for (int i = 0; lib_functions[i].symbol; i++) {
         const char *sym = lib_functions[i].symbol;
         void *fun = dlsym(p->lib_handle, sym);
@@ -374,8 +376,10 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = p->qf,
     };
-    if (vkCreateCommandPool(p->dev, &pool_info, NULL, &p->cmd_pool) != VK_SUCCESS)
+    if (vkCreateCommandPool(p->dev, &pool_info, NULL, &p->cmd_pool) != VK_SUCCESS) {
+        MP_ERR(mapper, "vkCreateCommandPool failed\n");
         return -1;
+    }
 
     VkCommandBufferAllocateInfo cmd_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -383,8 +387,10 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
-    if (vkAllocateCommandBuffers(p->dev, &cmd_info, &p->cmd) != VK_SUCCESS)
+    if (vkAllocateCommandBuffers(p->dev, &cmd_info, &p->cmd) != VK_SUCCESS) {
+        MP_ERR(mapper, "vkAllocateCommandBuffers failed\n");
         return -1;
+    }
 
     VkSemaphoreTypeCreateInfo tl_type = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -395,15 +401,19 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
         .pNext = &tl_type,
     };
-    if (vkCreateSemaphore(p->dev, &sem_info, NULL, &p->timeline) != VK_SUCCESS)
+    if (vkCreateSemaphore(p->dev, &sem_info, NULL, &p->timeline) != VK_SUCCESS) {
+        MP_ERR(mapper, "vkCreateSemaphore(timeline) failed\n");
         return -1;
+    }
 
     if (o->import_sem_fd) {
         VkSemaphoreCreateInfo bin_info = {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
         };
-        if (vkCreateSemaphore(p->dev, &bin_info, NULL, &p->acquire_sem) != VK_SUCCESS)
+        if (vkCreateSemaphore(p->dev, &bin_info, NULL, &p->acquire_sem) != VK_SUCCESS) {
+            MP_ERR(mapper, "vkCreateSemaphore(acquire) failed\n");
             return -1;
+        }
     }
 
     return 0;
@@ -575,16 +585,20 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
         .bindingCount = 2,
         .pBindings = bindings,
     };
-    if (vkCreateDescriptorSetLayout(p->dev, &dsl_info, NULL, &p->dsl) != VK_SUCCESS)
+    if (vkCreateDescriptorSetLayout(p->dev, &dsl_info, NULL, &p->dsl) != VK_SUCCESS) {
+        MP_ERR(p, "vkCreateDescriptorSetLayout failed\n");
         return false;
+    }
 
     VkPipelineLayoutCreateInfo pll_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
         .pSetLayouts = &p->dsl,
     };
-    if (vkCreatePipelineLayout(p->dev, &pll_info, NULL, &p->pll) != VK_SUCCESS)
+    if (vkCreatePipelineLayout(p->dev, &pll_info, NULL, &p->pll) != VK_SUCCESS) {
+        MP_ERR(p, "vkCreatePipelineLayout failed\n");
         return false;
+    }
 
     VkShaderModuleCreateInfo shader_info = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -592,8 +606,10 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
         .pCode = aimagereader_vk_shader_spv,
     };
     VkShaderModule shader;
-    if (vkCreateShaderModule(p->dev, &shader_info, NULL, &shader) != VK_SUCCESS)
+    if (vkCreateShaderModule(p->dev, &shader_info, NULL, &shader) != VK_SUCCESS) {
+        MP_ERR(p, "vkCreateShaderModule failed\n");
         return false;
+    }
 
     VkComputePipelineCreateInfo pipe_info = {
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -623,8 +639,10 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
         .poolSizeCount = 2,
         .pPoolSizes = pool_sizes,
     };
-    if (vkCreateDescriptorPool(p->dev, &dpool_info, NULL, &p->dpool) != VK_SUCCESS)
+    if (vkCreateDescriptorPool(p->dev, &dpool_info, NULL, &p->dpool) != VK_SUCCESS) {
+        MP_ERR(p, "vkCreateDescriptorPool failed\n");
         return false;
+    }
 
     VkDescriptorSetAllocateInfo dset_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -632,8 +650,10 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
         .descriptorSetCount = 1,
         .pSetLayouts = &p->dsl,
     };
-    if (vkAllocateDescriptorSets(p->dev, &dset_info, &p->dset) != VK_SUCCESS)
+    if (vkAllocateDescriptorSets(p->dev, &dset_info, &p->dset) != VK_SUCCESS) {
+        MP_ERR(p, "vkAllocateDescriptorSets failed\n");
         return false;
+    }
 
     return true;
 }
@@ -832,8 +852,11 @@ static bool import_input(struct ra_hwdec_mapper *mapper, AHardwareBuffer *hwbuf,
             break;
         }
     }
-    if (mem_type < 0)
+    if (mem_type < 0) {
+        MP_ERR(p, "No importable memory type (bits 0x%x)\n",
+               (unsigned)props->memoryTypeBits);
         return false;
+    }
 
     VkImportAndroidHardwareBufferInfoANDROID import_info = {
         .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
@@ -1119,7 +1142,10 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     }
     if (fence_fd >= 0) {
         struct pollfd pfd = { .fd = fence_fd, .events = POLLIN };
-        poll(&pfd, 1, 100);
+        int pres = poll(&pfd, 1, 100);
+        if (pres <= 0)
+            MP_WARN(mapper, "Acquire fence wait %s\n",
+                    pres ? "failed" : "timed out");
         close(fence_fd);
     }
 
