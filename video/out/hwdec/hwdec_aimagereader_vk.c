@@ -78,6 +78,12 @@ struct priv_owner {
     jobject surface;
     void *lib_handle;
 
+    // Image-available signal; owner-scoped because a listener callback can
+    // be in flight during mapper teardown. Destroyed after AImageReader_delete.
+    mp_mutex lock;
+    mp_cond cond;
+    bool image_available;
+
     pl_gpu gpu;
     pl_vulkan vk;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_ahb_props;
@@ -106,10 +112,6 @@ struct priv {
     AImage *image;
     AImage *prev_image;
 
-    mp_mutex lock;
-    mp_cond cond;
-    bool image_available;
-
     VkDevice dev;
     VkQueue queue;
     uint32_t qf;
@@ -128,6 +130,9 @@ struct priv {
     uint64_t cur_external_format;
     VkFormat cur_format;
     VkSamplerYcbcrModelConversion cur_model;
+    VkSamplerYcbcrRange cur_range;
+    VkChromaLocation cur_x_loc, cur_y_loc;
+    VkComponentMapping cur_components;
     VkSamplerYcbcrConversion conv;
     VkSampler sampler;
     VkDescriptorSetLayout dsl;
@@ -186,8 +191,10 @@ static AVBufferRef *create_mediacodec_device_ref(jobject surface)
 static bool load_lib_functions(struct priv_owner *p, struct mp_log *log)
 {
     p->lib_handle = dlopen("libmediandk.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!p->lib_handle)
+    if (!p->lib_handle) {
+        mp_warn(log, "Could not open libmediandk.so: %s\n", dlerror());
         return false;
+    }
     for (int i = 0; lib_functions[i].symbol; i++) {
         const char *sym = lib_functions[i].symbol;
         void *fun = dlsym(p->lib_handle, sym);
@@ -207,6 +214,9 @@ static int init(struct ra_hwdec *hw)
 {
     struct priv_owner *p = hw->priv;
     int level = hw->probing ? MSGL_V : MSGL_ERR;
+
+    mp_mutex_init(&p->lock);
+    mp_cond_init(&p->cond);
 
     struct mpvk_ctx *vk = ra_vk_ctx_get(hw->ra_ctx);
     if (!vk)
@@ -315,6 +325,9 @@ static void uninit(struct ra_hwdec *hw)
     hwdec_devices_remove(hw->devs, &p->hwctx);
     av_buffer_unref(&p->hwctx.av_device_ref);
 
+    mp_cond_destroy(&p->cond);
+    mp_mutex_destroy(&p->lock);
+
     if (p->lib_handle) {
         dlclose(p->lib_handle);
         p->lib_handle = NULL;
@@ -323,12 +336,12 @@ static void uninit(struct ra_hwdec *hw)
 
 static void image_callback(void *context, AImageReader *reader)
 {
-    struct priv *p = context;
+    struct priv_owner *o = context;
 
-    mp_mutex_lock(&p->lock);
-    p->image_available = true;
-    mp_cond_signal(&p->cond);
-    mp_mutex_unlock(&p->lock);
+    mp_mutex_lock(&o->lock);
+    o->image_available = true;
+    mp_cond_signal(&o->cond);
+    mp_mutex_unlock(&o->lock);
 }
 
 static int mapper_init(struct ra_hwdec_mapper *mapper)
@@ -337,11 +350,13 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
     struct priv_owner *o = mapper->owner->priv;
 
     p->log = mapper->log;
-    mp_mutex_init(&p->lock);
-    mp_cond_init(&p->cond);
+
+    mp_mutex_lock(&o->lock);
+    o->image_available = false;
+    mp_mutex_unlock(&o->lock);
 
     AImageReader_ImageListener listener = {
-        .context = p,
+        .context = o,
         .onImageAvailable = image_callback,
     };
     o->AImageReader_setImageListener(o->reader, &listener);
@@ -361,8 +376,10 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = p->qf,
     };
-    if (vkCreateCommandPool(p->dev, &pool_info, NULL, &p->cmd_pool) != VK_SUCCESS)
+    if (vkCreateCommandPool(p->dev, &pool_info, NULL, &p->cmd_pool) != VK_SUCCESS) {
+        MP_ERR(mapper, "vkCreateCommandPool failed\n");
         return -1;
+    }
 
     VkCommandBufferAllocateInfo cmd_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -370,8 +387,10 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
-    if (vkAllocateCommandBuffers(p->dev, &cmd_info, &p->cmd) != VK_SUCCESS)
+    if (vkAllocateCommandBuffers(p->dev, &cmd_info, &p->cmd) != VK_SUCCESS) {
+        MP_ERR(mapper, "vkAllocateCommandBuffers failed\n");
         return -1;
+    }
 
     VkSemaphoreTypeCreateInfo tl_type = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -382,15 +401,19 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
         .pNext = &tl_type,
     };
-    if (vkCreateSemaphore(p->dev, &sem_info, NULL, &p->timeline) != VK_SUCCESS)
+    if (vkCreateSemaphore(p->dev, &sem_info, NULL, &p->timeline) != VK_SUCCESS) {
+        MP_ERR(mapper, "vkCreateSemaphore(timeline) failed\n");
         return -1;
+    }
 
     if (o->import_sem_fd) {
         VkSemaphoreCreateInfo bin_info = {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
         };
-        if (vkCreateSemaphore(p->dev, &bin_info, NULL, &p->acquire_sem) != VK_SUCCESS)
+        if (vkCreateSemaphore(p->dev, &bin_info, NULL, &p->acquire_sem) != VK_SUCCESS) {
+            MP_ERR(mapper, "vkCreateSemaphore(acquire) failed\n");
             return -1;
+        }
     }
 
     return 0;
@@ -472,15 +495,25 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
 {
     struct priv *p = mapper->priv;
 
+    const VkComponentMapping *comps = &fmt->samplerYcbcrConversionComponents;
     if (p->conv && fmt->externalFormat == p->cur_external_format &&
         fmt->format == p->cur_format &&
-        fmt->suggestedYcbcrModel == p->cur_model)
+        fmt->suggestedYcbcrModel == p->cur_model &&
+        fmt->suggestedYcbcrRange == p->cur_range &&
+        fmt->suggestedXChromaOffset == p->cur_x_loc &&
+        fmt->suggestedYChromaOffset == p->cur_y_loc &&
+        comps->r == p->cur_components.r && comps->g == p->cur_components.g &&
+        comps->b == p->cur_components.b && comps->a == p->cur_components.a)
         return true;
 
     destroy_format_objects(p);
     p->cur_external_format = fmt->externalFormat;
     p->cur_format = fmt->format;
     p->cur_model = fmt->suggestedYcbcrModel;
+    p->cur_range = fmt->suggestedYcbcrRange;
+    p->cur_x_loc = fmt->suggestedXChromaOffset;
+    p->cur_y_loc = fmt->suggestedYChromaOffset;
+    p->cur_components = *comps;
 
     MP_VERBOSE(p, "AHB import: vkFormat=%d externalFormat=0x%llx model=%d range=%d\n",
                (int)fmt->format, (unsigned long long)fmt->externalFormat,
@@ -552,16 +585,20 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
         .bindingCount = 2,
         .pBindings = bindings,
     };
-    if (vkCreateDescriptorSetLayout(p->dev, &dsl_info, NULL, &p->dsl) != VK_SUCCESS)
+    if (vkCreateDescriptorSetLayout(p->dev, &dsl_info, NULL, &p->dsl) != VK_SUCCESS) {
+        MP_ERR(p, "vkCreateDescriptorSetLayout failed\n");
         return false;
+    }
 
     VkPipelineLayoutCreateInfo pll_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
         .pSetLayouts = &p->dsl,
     };
-    if (vkCreatePipelineLayout(p->dev, &pll_info, NULL, &p->pll) != VK_SUCCESS)
+    if (vkCreatePipelineLayout(p->dev, &pll_info, NULL, &p->pll) != VK_SUCCESS) {
+        MP_ERR(p, "vkCreatePipelineLayout failed\n");
         return false;
+    }
 
     VkShaderModuleCreateInfo shader_info = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -569,8 +606,10 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
         .pCode = aimagereader_vk_shader_spv,
     };
     VkShaderModule shader;
-    if (vkCreateShaderModule(p->dev, &shader_info, NULL, &shader) != VK_SUCCESS)
+    if (vkCreateShaderModule(p->dev, &shader_info, NULL, &shader) != VK_SUCCESS) {
+        MP_ERR(p, "vkCreateShaderModule failed\n");
         return false;
+    }
 
     VkComputePipelineCreateInfo pipe_info = {
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -600,8 +639,10 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
         .poolSizeCount = 2,
         .pPoolSizes = pool_sizes,
     };
-    if (vkCreateDescriptorPool(p->dev, &dpool_info, NULL, &p->dpool) != VK_SUCCESS)
+    if (vkCreateDescriptorPool(p->dev, &dpool_info, NULL, &p->dpool) != VK_SUCCESS) {
+        MP_ERR(p, "vkCreateDescriptorPool failed\n");
         return false;
+    }
 
     VkDescriptorSetAllocateInfo dset_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -609,8 +650,10 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
         .descriptorSetCount = 1,
         .pSetLayouts = &p->dsl,
     };
-    if (vkAllocateDescriptorSets(p->dev, &dset_info, &p->dset) != VK_SUCCESS)
+    if (vkAllocateDescriptorSets(p->dev, &dset_info, &p->dset) != VK_SUCCESS) {
+        MP_ERR(p, "vkAllocateDescriptorSets failed\n");
         return false;
+    }
 
     return true;
 }
@@ -673,17 +716,55 @@ static bool ensure_output(struct ra_hwdec_mapper *mapper, uint32_t w, uint32_t h
     return true;
 }
 
-static void wait_last_submit(struct priv *p)
+static void wait_timeline(struct priv *p, uint64_t value)
 {
-    if (!p->last_submit)
-        return;
     VkSemaphoreWaitInfo wait = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
         .semaphoreCount = 1,
         .pSemaphores = &p->timeline,
-        .pValues = &p->last_submit,
+        .pValues = &value,
     };
     vkWaitSemaphores(p->dev, &wait, 1000000000ull);
+}
+
+static void wait_last_submit(struct priv *p)
+{
+    if (p->last_submit)
+        wait_timeline(p, p->last_submit);
+}
+
+// Blocks until libplacebo's pending reads of the wrapped planes retired;
+// they run on another queue, not covered by our own timeline values.
+static void reclaim_plane_wrappers(struct ra_hwdec_mapper *mapper,
+                                   struct ra_tex **planes)
+{
+    struct priv *p = mapper->priv;
+    struct priv_owner *o = mapper->owner->priv;
+    uint64_t reclaim_value = 0;
+
+    for (int i = 0; i < 2; i++) {
+        if (!planes[i])
+            continue;
+        uint64_t value = ++p->tl_value;
+        bool held = pl_vulkan_hold_ex(o->gpu, pl_vulkan_hold_params(
+            .tex = planes[i]->priv,
+            .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .qf = p->qf,
+            .semaphore = (pl_vulkan_sem) {
+                .sem = p->timeline,
+                .value = value,
+            },
+        ));
+        if (held) {
+            reclaim_value = value;
+        } else {
+            MP_WARN(mapper, "Reclaiming plane %d failed, draining the GPU\n", i);
+            pl_gpu_finish(o->gpu);
+        }
+    }
+
+    if (reclaim_value)
+        wait_timeline(p, reclaim_value);
 }
 
 static void mapper_uninit(struct ra_hwdec_mapper *mapper)
@@ -696,6 +777,8 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     if (p->dev) {
         wait_last_submit(p);
 
+        reclaim_plane_wrappers(mapper, p->prev_plane_ra);
+        reclaim_plane_wrappers(mapper, p->plane_ra);
         free_plane_wrappers(mapper, p->prev_plane_ra);
         free_plane_wrappers(mapper, p->plane_ra);
         destroy_input(p, &p->prev_in_view, &p->prev_in_image, &p->prev_in_mem);
@@ -716,9 +799,6 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     if (p->image)
         o->AImage_delete(p->image);
     p->prev_image = p->image = NULL;
-
-    mp_mutex_destroy(&p->lock);
-    mp_cond_destroy(&p->cond);
 }
 
 static void mapper_unmap(struct ra_hwdec_mapper *mapper)
@@ -772,8 +852,11 @@ static bool import_input(struct ra_hwdec_mapper *mapper, AHardwareBuffer *hwbuf,
             break;
         }
     }
-    if (mem_type < 0)
+    if (mem_type < 0) {
+        MP_ERR(p, "No importable memory type (bits 0x%x)\n",
+               (unsigned)props->memoryTypeBits);
         return false;
+    }
 
     VkImportAndroidHardwareBufferInfoANDROID import_info = {
         .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
@@ -909,7 +992,8 @@ static void record_acquire_barrier(struct priv *p, uint32_t external_qf,
 
 // UNTESTED on external-format-only drivers' counterpart hardware: wraps the
 // two planes of a standard multiplanar decoder buffer directly as libplacebo
-// textures (true YUV, no repack). Falls back to the repack path on failure.
+// textures (true YUV, no repack). Falls back to the repack path on failure;
+// all fallible steps precede the submit, so the fallback races nothing.
 static bool map_direct(struct ra_hwdec_mapper *mapper,
     const VkAndroidHardwareBufferFormatPropertiesANDROID *fmt,
     uint32_t w, uint32_t h)
@@ -939,9 +1023,12 @@ static bool map_direct(struct ra_hwdec_mapper *mapper,
         ));
         if (!planes[i]) {
             MP_WARN(mapper, "direct plane wrap failed, using repack\n");
-            for (int j = 0; j < i; j++)
-                pl_tex_destroy(o->gpu, &planes[j]);
-            return false;
+            goto fail;
+        }
+        p->plane_ra[i] = talloc_zero(NULL, struct ra_tex);
+        if (!mppl_wrap_tex(mapper->ra, planes[i], p->plane_ra[i])) {
+            MP_WARN(mapper, "mppl_wrap_tex(plane %d) failed, using repack\n", i);
+            goto fail;
         }
     }
 
@@ -953,16 +1040,12 @@ static bool map_direct(struct ra_hwdec_mapper *mapper,
     vkBeginCommandBuffer(p->cmd, &begin);
     record_acquire_barrier(p, o->external_qf,
                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     vkEndCommandBuffer(p->cmd);
 
     uint64_t signal_value = ++p->tl_value;
-    if (!submit_work(mapper, 0, signal_value, false)) {
-        for (int i = 0; i < 2; i++)
-            pl_tex_destroy(o->gpu, &planes[i]);
-        return false;
-    }
+    if (!submit_work(mapper, 0, signal_value, false))
+        goto fail;
 
     for (int i = 0; i < 2; i++) {
         pl_vulkan_release_ex(o->gpu, pl_vulkan_release_params(
@@ -974,11 +1057,6 @@ static bool map_direct(struct ra_hwdec_mapper *mapper,
                 .value = signal_value,
             },
         ));
-        p->plane_ra[i] = talloc_zero(NULL, struct ra_tex);
-        if (!mppl_wrap_tex(mapper->ra, planes[i], p->plane_ra[i])) {
-            MP_ERR(mapper, "mppl_wrap_tex(plane %d) failed\n", i);
-            return false;
-        }
         mapper->tex[i] = p->plane_ra[i];
     }
 
@@ -986,6 +1064,17 @@ static bool map_direct(struct ra_hwdec_mapper *mapper,
     mapper->dst_params.imgfmt = p010 ? IMGFMT_P010 : IMGFMT_NV12;
     mapper->dst_params.hw_subfmt = 0;
     return true;
+
+fail:
+    for (int i = 0; i < 2; i++) {
+        if (p->plane_ra[i]) {
+            // Also destroys the wrapped pl_tex.
+            ra_tex_free(mapper->ra, &p->plane_ra[i]);
+        } else if (planes[i]) {
+            pl_tex_destroy(o->gpu, &planes[i]);
+        }
+    }
+    return false;
 }
 
 static int mapper_map(struct ra_hwdec_mapper *mapper)
@@ -1001,18 +1090,20 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     }
 
     bool image_available = false;
-    mp_mutex_lock(&p->lock);
-    if (!p->image_available) {
-        mp_cond_timedwait(&p->cond, &p->lock, MP_TIME_MS_TO_NS(100));
-        if (!p->image_available)
+    mp_mutex_lock(&o->lock);
+    if (!o->image_available) {
+        mp_cond_timedwait(&o->cond, &o->lock, MP_TIME_MS_TO_NS(100));
+        if (!o->image_available)
             MP_WARN(mapper, "Waiting for frame timed out!\n");
     }
-    image_available = p->image_available;
-    p->image_available = false;
-    mp_mutex_unlock(&p->lock);
+    image_available = o->image_available;
+    o->image_available = false;
+    mp_mutex_unlock(&o->lock);
 
-    // Our previous submit provably retired before its resources are touched.
+    // Our previous submit provably retired before its resources are touched;
+    // direct-path planes are additionally reclaimed from libplacebo's queue.
     wait_last_submit(p);
+    reclaim_plane_wrappers(mapper, p->prev_plane_ra);
     free_plane_wrappers(mapper, p->prev_plane_ra);
     destroy_input(p, &p->prev_in_view, &p->prev_in_image, &p->prev_in_mem);
     if (p->prev_image) {
@@ -1051,7 +1142,10 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     }
     if (fence_fd >= 0) {
         struct pollfd pfd = { .fd = fence_fd, .events = POLLIN };
-        poll(&pfd, 1, 100);
+        int pres = poll(&pfd, 1, 100);
+        if (pres <= 0)
+            MP_WARN(mapper, "Acquire fence wait %s\n",
+                    pres ? "failed" : "timed out");
         close(fence_fd);
     }
 

@@ -2,11 +2,14 @@
 
 This is a public fork of [mpv](https://github.com/mpv-player/mpv) maintained by the
 [Quven](https://quven.tv) media server project. The libmpv built from this fork ships inside the
-Quven Android client; publishing the modified sources here satisfies libmpv's LGPL-2.1+ §6 source
-offer.
+Quven Android and iOS clients; publishing the modified sources here satisfies libmpv's LGPL-2.1+
+§6 source offer.
 
-Everything lives on the branch **`quven/android-vk-interop`**, based on an upstream master
-snapshot (`a3d4b5919`, 2026-07-01). `master` tracks upstream and carries no changes.
+Two branches carry changes, both based on upstream master and kept in sync via periodic merges;
+`master` tracks upstream and carries no changes:
+
+- **`quven/android-vk-interop`** — the Android MediaCodec/Vulkan interop below.
+- **`quven/metal-context`** — everything above plus the iOS/macOS Metal integration below.
 
 ## How this fork diverges from upstream
 
@@ -45,9 +48,19 @@ Notes for other integrators:
   silently while returning broken chroma (tested on Xclipse; the experiment is preserved in this
   branch's history as reverted commits).
 - The decoder must receive frame side data for DV to work with hardware decode: FFmpeg's
-  `mediacodecdec` does not attach the DOVI RPU upstream. Quven carries a small FFmpeg patch for
-  that (not part of this repo — see `tools/libmpv/quven-ffmpeg-dovi-mediacodec.patch` in the Quven
-  distribution artifacts, or apply the equivalent to your FFmpeg build).
+  `mediacodecdec` does not attach the DOVI RPU upstream. This repo carries the FFmpeg patch under
+  `quven-patches/ffmpeg/` (applies to FFmpeg n8.1.2).
+
+### Metal gpu-context (branch `quven/metal-context` only)
+
+- `video/out/metal/` — a CAMetalLayer ra_ctx (`--gpu-api=metal --gpu-context=metal`) backed by
+  libplacebo's native Metal backend (github.com/nickayl/libplacebo, branch `quven/metal-backend`),
+  replacing MoltenVK on Apple platforms. Same `--wid` embedding contract as the moltenvk context;
+  polls the drawable size to pick up out-of-band UIKit resizes.
+- `hwdec_vt_pl` — accepts Metal pl_gpus (zero-copy VideoToolbox via `PL_HANDLE_MTL_TEX`).
+- `--metal-frame-mirror-cb` / `--metal-frame-mirror-priv` — forward a per-frame IOSurface mirror
+  callback into the libplacebo swapchain (Picture in Picture / AirPlay). Embedder-only pointer
+  options, passed as int64 like `--wid`.
 
 ### Android embedder patches absorbed as commits
 
@@ -59,13 +72,16 @@ Notes for other integrators:
 
 ## Building
 
-The fork builds exactly like upstream mpv. The interop compiles when both `android-media-ndk` and
-`vulkan` features are enabled; it registers as hwdec `aimagereader-vk` and is picked automatically
-by `--gpu-context=androidvk` sessions with `--hwdec=mediacodec`. Requirements: libplacebo ≥ 7.360
-built with Vulkan support (including `vk-proc-addr` — the loader link), NDK ≥ r26.
+The fork builds exactly like upstream mpv. The Android interop compiles when both
+`android-media-ndk` and `vulkan` features are enabled; it registers as hwdec `aimagereader-vk` and
+is picked automatically by `--gpu-context=androidvk` sessions with `--hwdec=mediacodec`.
+Requirements: libplacebo ≥ 7.360 built with Vulkan support (including `vk-proc-addr` — the loader
+link), NDK ≥ r26. The Metal context requires a libplacebo built with `-Dmetal=enabled` (the
+`quven/metal-backend` branch of the libplacebo fork).
 
-Quven's own reproducible build recipe (LGPL toolchain, arm64) lives in the Quven repository as
-`tools/libmpv/build-libmpv-android.sh`, which consumes this fork via `QUVEN_MPV_REPO`/`QUVEN_MPV_REF`.
+Quven's own reproducible build recipes (LGPL toolchain) live in the Quven repository as
+`tools/libmpv/build-libmpv-android.sh` and `tools/libmpv/build-libmpv-ios.sh`, which consume this
+fork via `QUVEN_MPV_REPO`/`QUVEN_MPV_REF`.
 
 ## License
 
