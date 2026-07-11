@@ -686,17 +686,57 @@ static bool ensure_output(struct ra_hwdec_mapper *mapper, uint32_t w, uint32_t h
     return true;
 }
 
-static void wait_last_submit(struct priv *p)
+static void wait_timeline(struct priv *p, uint64_t value)
 {
-    if (!p->last_submit)
-        return;
     VkSemaphoreWaitInfo wait = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
         .semaphoreCount = 1,
         .pSemaphores = &p->timeline,
-        .pValues = &p->last_submit,
+        .pValues = &value,
     };
     vkWaitSemaphores(p->dev, &wait, 1000000000ull);
+}
+
+static void wait_last_submit(struct priv *p)
+{
+    if (p->last_submit)
+        wait_timeline(p, p->last_submit);
+}
+
+// Reacquires the direct-path plane wrappers from libplacebo and blocks until
+// its pending reads retired. The wrappers alias the imported VkImage, and
+// libplacebo samples them on its own queue, which the timeline value of our
+// last submit does not cover.
+static void reclaim_plane_wrappers(struct ra_hwdec_mapper *mapper,
+                                   struct ra_tex **planes)
+{
+    struct priv *p = mapper->priv;
+    struct priv_owner *o = mapper->owner->priv;
+    uint64_t reclaim_value = 0;
+
+    for (int i = 0; i < 2; i++) {
+        if (!planes[i])
+            continue;
+        uint64_t value = ++p->tl_value;
+        bool held = pl_vulkan_hold_ex(o->gpu, pl_vulkan_hold_params(
+            .tex = planes[i]->priv,
+            .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .qf = p->qf,
+            .semaphore = (pl_vulkan_sem) {
+                .sem = p->timeline,
+                .value = value,
+            },
+        ));
+        if (held) {
+            reclaim_value = value;
+        } else {
+            MP_WARN(mapper, "Reclaiming plane %d failed, draining the GPU\n", i);
+            pl_gpu_finish(o->gpu);
+        }
+    }
+
+    if (reclaim_value)
+        wait_timeline(p, reclaim_value);
 }
 
 static void mapper_uninit(struct ra_hwdec_mapper *mapper)
@@ -709,6 +749,8 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     if (p->dev) {
         wait_last_submit(p);
 
+        reclaim_plane_wrappers(mapper, p->prev_plane_ra);
+        reclaim_plane_wrappers(mapper, p->plane_ra);
         free_plane_wrappers(mapper, p->prev_plane_ra);
         free_plane_wrappers(mapper, p->plane_ra);
         destroy_input(p, &p->prev_in_view, &p->prev_in_image, &p->prev_in_mem);
@@ -922,7 +964,9 @@ static void record_acquire_barrier(struct priv *p, uint32_t external_qf,
 
 // UNTESTED on external-format-only drivers' counterpart hardware: wraps the
 // two planes of a standard multiplanar decoder buffer directly as libplacebo
-// textures (true YUV, no repack). Falls back to the repack path on failure.
+// textures (true YUV, no repack). Falls back to the repack path on failure;
+// every fallible step happens before any GPU work is submitted, so the
+// fallback never races a command buffer referencing the input image.
 static bool map_direct(struct ra_hwdec_mapper *mapper,
     const VkAndroidHardwareBufferFormatPropertiesANDROID *fmt,
     uint32_t w, uint32_t h)
@@ -952,9 +996,12 @@ static bool map_direct(struct ra_hwdec_mapper *mapper,
         ));
         if (!planes[i]) {
             MP_WARN(mapper, "direct plane wrap failed, using repack\n");
-            for (int j = 0; j < i; j++)
-                pl_tex_destroy(o->gpu, &planes[j]);
-            return false;
+            goto fail;
+        }
+        p->plane_ra[i] = talloc_zero(NULL, struct ra_tex);
+        if (!mppl_wrap_tex(mapper->ra, planes[i], p->plane_ra[i])) {
+            MP_WARN(mapper, "mppl_wrap_tex(plane %d) failed, using repack\n", i);
+            goto fail;
         }
     }
 
@@ -966,16 +1013,12 @@ static bool map_direct(struct ra_hwdec_mapper *mapper,
     vkBeginCommandBuffer(p->cmd, &begin);
     record_acquire_barrier(p, o->external_qf,
                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     vkEndCommandBuffer(p->cmd);
 
     uint64_t signal_value = ++p->tl_value;
-    if (!submit_work(mapper, 0, signal_value, false)) {
-        for (int i = 0; i < 2; i++)
-            pl_tex_destroy(o->gpu, &planes[i]);
-        return false;
-    }
+    if (!submit_work(mapper, 0, signal_value, false))
+        goto fail;
 
     for (int i = 0; i < 2; i++) {
         pl_vulkan_release_ex(o->gpu, pl_vulkan_release_params(
@@ -987,11 +1030,6 @@ static bool map_direct(struct ra_hwdec_mapper *mapper,
                 .value = signal_value,
             },
         ));
-        p->plane_ra[i] = talloc_zero(NULL, struct ra_tex);
-        if (!mppl_wrap_tex(mapper->ra, planes[i], p->plane_ra[i])) {
-            MP_ERR(mapper, "mppl_wrap_tex(plane %d) failed\n", i);
-            return false;
-        }
         mapper->tex[i] = p->plane_ra[i];
     }
 
@@ -999,6 +1037,17 @@ static bool map_direct(struct ra_hwdec_mapper *mapper,
     mapper->dst_params.imgfmt = p010 ? IMGFMT_P010 : IMGFMT_NV12;
     mapper->dst_params.hw_subfmt = 0;
     return true;
+
+fail:
+    for (int i = 0; i < 2; i++) {
+        if (p->plane_ra[i]) {
+            // Also destroys the wrapped pl_tex.
+            ra_tex_free(mapper->ra, &p->plane_ra[i]);
+        } else if (planes[i]) {
+            pl_tex_destroy(o->gpu, &planes[i]);
+        }
+    }
+    return false;
 }
 
 static int mapper_map(struct ra_hwdec_mapper *mapper)
@@ -1025,7 +1074,10 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     mp_mutex_unlock(&p->lock);
 
     // Our previous submit provably retired before its resources are touched.
+    // Direct-path plane wrappers are additionally reclaimed from libplacebo,
+    // whose render of them runs on another queue.
     wait_last_submit(p);
+    reclaim_plane_wrappers(mapper, p->prev_plane_ra);
     free_plane_wrappers(mapper, p->prev_plane_ra);
     destroy_input(p, &p->prev_in_view, &p->prev_in_image, &p->prev_in_mem);
     if (p->prev_image) {
