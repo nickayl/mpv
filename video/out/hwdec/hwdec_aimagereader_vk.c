@@ -128,6 +128,9 @@ struct priv {
     uint64_t cur_external_format;
     VkFormat cur_format;
     VkSamplerYcbcrModelConversion cur_model;
+    VkSamplerYcbcrRange cur_range;
+    VkChromaLocation cur_x_loc, cur_y_loc;
+    VkComponentMapping cur_components;
     VkSamplerYcbcrConversion conv;
     VkSampler sampler;
     VkDescriptorSetLayout dsl;
@@ -472,15 +475,25 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
 {
     struct priv *p = mapper->priv;
 
+    const VkComponentMapping *comps = &fmt->samplerYcbcrConversionComponents;
     if (p->conv && fmt->externalFormat == p->cur_external_format &&
         fmt->format == p->cur_format &&
-        fmt->suggestedYcbcrModel == p->cur_model)
+        fmt->suggestedYcbcrModel == p->cur_model &&
+        fmt->suggestedYcbcrRange == p->cur_range &&
+        fmt->suggestedXChromaOffset == p->cur_x_loc &&
+        fmt->suggestedYChromaOffset == p->cur_y_loc &&
+        comps->r == p->cur_components.r && comps->g == p->cur_components.g &&
+        comps->b == p->cur_components.b && comps->a == p->cur_components.a)
         return true;
 
     destroy_format_objects(p);
     p->cur_external_format = fmt->externalFormat;
     p->cur_format = fmt->format;
     p->cur_model = fmt->suggestedYcbcrModel;
+    p->cur_range = fmt->suggestedYcbcrRange;
+    p->cur_x_loc = fmt->suggestedXChromaOffset;
+    p->cur_y_loc = fmt->suggestedYChromaOffset;
+    p->cur_components = *comps;
 
     MP_VERBOSE(p, "AHB import: vkFormat=%d externalFormat=0x%llx model=%d range=%d\n",
                (int)fmt->format, (unsigned long long)fmt->externalFormat,
