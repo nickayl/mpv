@@ -78,6 +78,12 @@ struct priv_owner {
     jobject surface;
     void *lib_handle;
 
+    // Image-available signal; owner-scoped because a listener callback can
+    // be in flight during mapper teardown. Destroyed after AImageReader_delete.
+    mp_mutex lock;
+    mp_cond cond;
+    bool image_available;
+
     pl_gpu gpu;
     pl_vulkan vk;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_ahb_props;
@@ -105,10 +111,6 @@ struct priv {
 
     AImage *image;
     AImage *prev_image;
-
-    mp_mutex lock;
-    mp_cond cond;
-    bool image_available;
 
     VkDevice dev;
     VkQueue queue;
@@ -210,6 +212,9 @@ static int init(struct ra_hwdec *hw)
 {
     struct priv_owner *p = hw->priv;
     int level = hw->probing ? MSGL_V : MSGL_ERR;
+
+    mp_mutex_init(&p->lock);
+    mp_cond_init(&p->cond);
 
     struct mpvk_ctx *vk = ra_vk_ctx_get(hw->ra_ctx);
     if (!vk)
@@ -318,6 +323,9 @@ static void uninit(struct ra_hwdec *hw)
     hwdec_devices_remove(hw->devs, &p->hwctx);
     av_buffer_unref(&p->hwctx.av_device_ref);
 
+    mp_cond_destroy(&p->cond);
+    mp_mutex_destroy(&p->lock);
+
     if (p->lib_handle) {
         dlclose(p->lib_handle);
         p->lib_handle = NULL;
@@ -326,12 +334,12 @@ static void uninit(struct ra_hwdec *hw)
 
 static void image_callback(void *context, AImageReader *reader)
 {
-    struct priv *p = context;
+    struct priv_owner *o = context;
 
-    mp_mutex_lock(&p->lock);
-    p->image_available = true;
-    mp_cond_signal(&p->cond);
-    mp_mutex_unlock(&p->lock);
+    mp_mutex_lock(&o->lock);
+    o->image_available = true;
+    mp_cond_signal(&o->cond);
+    mp_mutex_unlock(&o->lock);
 }
 
 static int mapper_init(struct ra_hwdec_mapper *mapper)
@@ -340,11 +348,13 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
     struct priv_owner *o = mapper->owner->priv;
 
     p->log = mapper->log;
-    mp_mutex_init(&p->lock);
-    mp_cond_init(&p->cond);
+
+    mp_mutex_lock(&o->lock);
+    o->image_available = false;
+    mp_mutex_unlock(&o->lock);
 
     AImageReader_ImageListener listener = {
-        .context = p,
+        .context = o,
         .onImageAvailable = image_callback,
     };
     o->AImageReader_setImageListener(o->reader, &listener);
@@ -703,10 +713,8 @@ static void wait_last_submit(struct priv *p)
         wait_timeline(p, p->last_submit);
 }
 
-// Reacquires the direct-path plane wrappers from libplacebo and blocks until
-// its pending reads retired. The wrappers alias the imported VkImage, and
-// libplacebo samples them on its own queue, which the timeline value of our
-// last submit does not cover.
+// Blocks until libplacebo's pending reads of the wrapped planes retired;
+// they run on another queue, not covered by our own timeline values.
 static void reclaim_plane_wrappers(struct ra_hwdec_mapper *mapper,
                                    struct ra_tex **planes)
 {
@@ -771,9 +779,6 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     if (p->image)
         o->AImage_delete(p->image);
     p->prev_image = p->image = NULL;
-
-    mp_mutex_destroy(&p->lock);
-    mp_cond_destroy(&p->cond);
 }
 
 static void mapper_unmap(struct ra_hwdec_mapper *mapper)
@@ -965,8 +970,7 @@ static void record_acquire_barrier(struct priv *p, uint32_t external_qf,
 // UNTESTED on external-format-only drivers' counterpart hardware: wraps the
 // two planes of a standard multiplanar decoder buffer directly as libplacebo
 // textures (true YUV, no repack). Falls back to the repack path on failure;
-// every fallible step happens before any GPU work is submitted, so the
-// fallback never races a command buffer referencing the input image.
+// all fallible steps precede the submit, so the fallback races nothing.
 static bool map_direct(struct ra_hwdec_mapper *mapper,
     const VkAndroidHardwareBufferFormatPropertiesANDROID *fmt,
     uint32_t w, uint32_t h)
@@ -1063,19 +1067,18 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     }
 
     bool image_available = false;
-    mp_mutex_lock(&p->lock);
-    if (!p->image_available) {
-        mp_cond_timedwait(&p->cond, &p->lock, MP_TIME_MS_TO_NS(100));
-        if (!p->image_available)
+    mp_mutex_lock(&o->lock);
+    if (!o->image_available) {
+        mp_cond_timedwait(&o->cond, &o->lock, MP_TIME_MS_TO_NS(100));
+        if (!o->image_available)
             MP_WARN(mapper, "Waiting for frame timed out!\n");
     }
-    image_available = p->image_available;
-    p->image_available = false;
-    mp_mutex_unlock(&p->lock);
+    image_available = o->image_available;
+    o->image_available = false;
+    mp_mutex_unlock(&o->lock);
 
-    // Our previous submit provably retired before its resources are touched.
-    // Direct-path plane wrappers are additionally reclaimed from libplacebo,
-    // whose render of them runs on another queue.
+    // Our previous submit provably retired before its resources are touched;
+    // direct-path planes are additionally reclaimed from libplacebo's queue.
     wait_last_submit(p);
     reclaim_plane_wrappers(mapper, p->prev_plane_ra);
     free_plane_wrappers(mapper, p->prev_plane_ra);
