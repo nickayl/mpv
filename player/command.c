@@ -2115,7 +2115,8 @@ static int get_track_entry(int item, int action, void *arg, void *ctx)
         {"main-selection", SUB_PROP_INT(order), .unavailable = order < 0},
         {"external-filename", SUB_PROP_STR(track->external_filename),
                         .unavailable = !track->external_filename},
-        {"ff-index",    SUB_PROP_INT(track->ff_index)},
+        {"ff-index",    SUB_PROP_INT(track->ff_index),
+                        .unavailable = track->ff_index == -1},
         {"hls-bitrate", SUB_PROP_INT(track->hls_bitrate),
                         .unavailable = !track->hls_bitrate},
         {"program-id",  SUB_PROP_INT(sh && sh->num_program_ids ? sh->program_ids[0] : -1),
@@ -5097,6 +5098,7 @@ static const struct property_osd_display {
       "${?secondary-sub-visibility==yes:visible${?secondary-sid==no: (but no secondary subtitles selected)}}"},
     {"sub-forced-events-only", "Forced sub only"},
     {"sub-scale", "Sub Scale"},
+    {"secondary-sub-scale", "Secondary sub scale"},
     {"sub-ass-use-video-data", "Subtitle using video properties"},
     {"sub-ass-video-aspect-override", "Subtitle aspect override"},
     {"sub-ass-override", "ASS subtitle style override"},
@@ -8246,9 +8248,6 @@ void mp_option_run_callback(struct MPContext *mpctx, struct mp_option_callback *
                 int ret = sub_control(sub, SD_CTRL_UPDATE_OPTS, &flags);
                 if (ret == CONTROL_OK && flags & (UPDATE_SUB_FILT | UPDATE_SUB_HARD)) {
                     sub_redecode_cached_packets(sub);
-                    sub_reset(sub);
-                    if (track->selected)
-                        reselect_demux_stream(mpctx, track, true);
                 }
             }
         }
