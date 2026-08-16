@@ -411,6 +411,12 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     o->AImageReader_setImageListener(o->reader, NULL);
     release_previous_image(mapper);
     release_bound_image(mapper);
+    // release_previous_image returns early when it holds nothing, so a session that mapped its
+    // last frame without one leaves the fence behind.
+    if (p->draw_fence) {
+        gl->DeleteSync(p->draw_fence);
+        p->draw_fence = NULL;
+    }
 
     MP_VERBOSE(mapper, "mapped %u, repeated %u, dropped %u, fences waited %u, fence imports "
                "failed %u, draw fence timeouts %u\n", p->frames_mapped, p->frames_repeated,
