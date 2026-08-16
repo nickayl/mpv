@@ -75,6 +75,16 @@ static inline OPT_STRING_VALIDATE_FUNC(vk_validate_dev)
     AVUUID param_uuid;
     bool is_uuid = av_uuid_parse(*value, param_uuid) == 0;
 
+    // Resolved, not linked: a 1.1 import keeps the library from loading below
+    // Android API 29.
+    PFN_vkGetPhysicalDeviceProperties2 get_props2 =
+        (PFN_vkGetPhysicalDeviceProperties2)
+        vkGetInstanceProcAddr(inst->instance, "vkGetPhysicalDeviceProperties2");
+    if (!get_props2) {
+        mp_err(log, "Failed to resolve vkGetPhysicalDeviceProperties2\n");
+        goto done;
+    }
+
     for (int i = 0; i < num; i++) {
         VkPhysicalDeviceDriverProperties driver_prop = { 0 };
         driver_prop.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
@@ -87,7 +97,7 @@ static inline OPT_STRING_VALIDATE_FUNC(vk_validate_dev)
         prop2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR;
         prop2.pNext = &id_prop;
 
-        vkGetPhysicalDeviceProperties2(devices[i], &prop2);
+        get_props2(devices[i], &prop2);
 
         const VkPhysicalDeviceProperties *prop = &prop2.properties;
 

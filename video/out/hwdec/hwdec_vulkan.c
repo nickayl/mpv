@@ -76,7 +76,17 @@ static int vulkan_init(struct ra_hwdec *hw)
     uint32_t num_qf = 0;
     VkQueueFamilyProperties2 *qf = NULL;
     VkQueueFamilyVideoPropertiesKHR *qf_vid = NULL;
-    vkGetPhysicalDeviceQueueFamilyProperties2(vk->vulkan->phys_device, &num_qf, NULL);
+
+    // Resolved, not linked: a 1.1 import keeps the library from loading below
+    // Android API 29.
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties2 get_qf_props2 =
+        (PFN_vkGetPhysicalDeviceQueueFamilyProperties2)
+        vk->vulkan->get_proc_addr(vk->vulkan->instance,
+                                  "vkGetPhysicalDeviceQueueFamilyProperties2");
+    if (!get_qf_props2)
+        goto error;
+
+    get_qf_props2(vk->vulkan->phys_device, &num_qf, NULL);
     if (!num_qf)
         goto error;
 
@@ -92,7 +102,7 @@ static int vulkan_init(struct ra_hwdec *hw)
         };
     }
 
-    vkGetPhysicalDeviceQueueFamilyProperties2(vk->vulkan->phys_device, &num_qf, qf);
+    get_qf_props2(vk->vulkan->phys_device, &num_qf, qf);
 
     hw_device_ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VULKAN);
     if (!hw_device_ctx)

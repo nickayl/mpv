@@ -112,6 +112,12 @@ struct priv {
     AImage *image;
     AImage *prev_image;
 
+    // Post-1.0 core entry points; linking them would make libmpv unloadable below
+    // the API level that exports them (Ycbcr 29, timeline waits 31).
+    PFN_vkCreateSamplerYcbcrConversion create_ycbcr;
+    PFN_vkDestroySamplerYcbcrConversion destroy_ycbcr;
+    PFN_vkWaitSemaphores wait_semaphores;
+
     VkDevice dev;
     VkQueue queue;
     uint32_t qf;
@@ -371,6 +377,21 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
     p->qf = o->vk->queue_compute.index;
     vkGetDeviceQueue(p->dev, p->qf, 0, &p->queue);
 
+    PFN_vkGetDeviceProcAddr get_dev_proc = (PFN_vkGetDeviceProcAddr)
+        o->vk->get_proc_addr(o->vk->instance, "vkGetDeviceProcAddr");
+    if (get_dev_proc) {
+        p->create_ycbcr = (PFN_vkCreateSamplerYcbcrConversion)
+            get_dev_proc(p->dev, "vkCreateSamplerYcbcrConversion");
+        p->destroy_ycbcr = (PFN_vkDestroySamplerYcbcrConversion)
+            get_dev_proc(p->dev, "vkDestroySamplerYcbcrConversion");
+        p->wait_semaphores = (PFN_vkWaitSemaphores)
+            get_dev_proc(p->dev, "vkWaitSemaphores");
+    }
+    if (!p->create_ycbcr || !p->destroy_ycbcr || !p->wait_semaphores) {
+        MP_ERR(mapper, "device lacks Ycbcr conversion or timeline semaphore waits\n");
+        return -1;
+    }
+
     VkCommandPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -443,7 +464,7 @@ static void destroy_format_objects(struct priv *p)
         p->sampler = VK_NULL_HANDLE;
     }
     if (p->conv) {
-        vkDestroySamplerYcbcrConversion(p->dev, p->conv, NULL);
+        p->destroy_ycbcr(p->dev, p->conv, NULL);
         p->conv = VK_NULL_HANDLE;
     }
 }
@@ -539,8 +560,7 @@ static bool ensure_format_objects(struct ra_hwdec_mapper *mapper,
     if (!(fmt->formatFeatures &
           VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT))
         conv_info.chromaFilter = VK_FILTER_NEAREST;
-    if (vkCreateSamplerYcbcrConversion(p->dev, &conv_info, NULL, &p->conv)
-            != VK_SUCCESS) {
+    if (p->create_ycbcr(p->dev, &conv_info, NULL, &p->conv) != VK_SUCCESS) {
         MP_ERR(p, "vkCreateSamplerYcbcrConversion failed\n");
         return false;
     }
@@ -724,7 +744,7 @@ static void wait_timeline(struct priv *p, uint64_t value)
         .pSemaphores = &p->timeline,
         .pValues = &value,
     };
-    vkWaitSemaphores(p->dev, &wait, 1000000000ull);
+    p->wait_semaphores(p->dev, &wait, 1000000000ull);
 }
 
 static void wait_last_submit(struct priv *p)
