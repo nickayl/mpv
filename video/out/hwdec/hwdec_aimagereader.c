@@ -41,6 +41,9 @@ typedef void *EGLSyncKHR;
 #define EGL_SYNC_NATIVE_FENCE_FD_ANDROID 0x3145
 #define EGL_NO_NATIVE_FENCE_FD_ANDROID -1
 
+// Long enough that only a wedged GPU reaches it; the frame is returned regardless.
+static const uint64_t DrawFenceTimeoutNs = 100000000ull;
+
 struct priv_owner {
     struct mp_hwdec_ctx hwctx;
     AImageReader *reader;
@@ -69,13 +72,18 @@ struct priv {
     GLuint gl_texture;
     AImage *image;
     EGLImageKHR egl_image;
+    // Freed one frame late, once draw_fence proves the draw that sampled them retired: deleting an
+    // AImage returns its buffer to MediaCodec, which then rewrites it under a draw still queued.
+    AImage *prev_image;
+    EGLImageKHR prev_egl_image;
+    GLsync draw_fence;
 
     mp_mutex lock;
     mp_cond cond;
     bool image_available;
 
     unsigned frames_mapped, frames_repeated, frames_dropped;
-    unsigned fences_waited, fence_import_failures;
+    unsigned fences_waited, fence_import_failures, draw_fence_timeouts;
 
     EGLImageKHR (EGLAPIENTRY *CreateImageKHR)(
         EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
@@ -362,6 +370,38 @@ static void release_bound_image(struct ra_hwdec_mapper *mapper)
     }
 }
 
+// Retires the frame held back last time, once the GPU is done with it.
+static void release_previous_image(struct ra_hwdec_mapper *mapper)
+{
+    struct priv *p = mapper->priv;
+    struct priv_owner *o = mapper->owner->priv;
+    GL *gl = ra_gl_get(mapper->ra);
+
+    if (!p->prev_image && !p->prev_egl_image)
+        return;
+
+    if (p->draw_fence) {
+        GLenum waited = gl->ClientWaitSync(p->draw_fence, GL_SYNC_FLUSH_COMMANDS_BIT,
+                                           DrawFenceTimeoutNs);
+        if (waited == GL_TIMEOUT_EXPIRED) {
+            MP_WARN(mapper, "the draw sampling the previous frame did not retire in %u ms; "
+                    "returning its buffer anyway\n", (unsigned)(DrawFenceTimeoutNs / 1000000ull));
+            p->draw_fence_timeouts++;
+        }
+        gl->DeleteSync(p->draw_fence);
+        p->draw_fence = NULL;
+    }
+
+    if (p->prev_egl_image) {
+        p->DestroyImageKHR(eglGetCurrentDisplay(), p->prev_egl_image);
+        p->prev_egl_image = 0;
+    }
+    if (p->prev_image) {
+        o->AImage_delete(p->prev_image);
+        p->prev_image = NULL;
+    }
+}
+
 static void mapper_uninit(struct ra_hwdec_mapper *mapper)
 {
     struct priv *p = mapper->priv;
@@ -369,11 +409,13 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     GL *gl = ra_gl_get(mapper->ra);
 
     o->AImageReader_setImageListener(o->reader, NULL);
+    release_previous_image(mapper);
     release_bound_image(mapper);
 
     MP_VERBOSE(mapper, "mapped %u, repeated %u, dropped %u, fences waited %u, fence imports "
-               "failed %u\n", p->frames_mapped, p->frames_repeated, p->frames_dropped,
-               p->fences_waited, p->fence_import_failures);
+               "failed %u, draw fence timeouts %u\n", p->frames_mapped, p->frames_repeated,
+               p->frames_dropped, p->fences_waited, p->fence_import_failures,
+               p->draw_fence_timeouts);
 
     gl->DeleteTextures(1, &p->gl_texture);
     p->gl_texture = 0;
@@ -434,7 +476,12 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     mp_assert(image);
     p->frames_mapped++;
 
-    release_bound_image(mapper);
+    // The frame bound last time moves to prev and is freed on the next map; only the one before it
+    // is retired now, its draw already proven complete.
+    release_previous_image(mapper);
+    p->prev_image = p->image;
+    p->prev_egl_image = p->egl_image;
+    p->egl_image = 0;
     p->image = image;
 
     AHardwareBuffer *hwbuf = NULL;
@@ -477,6 +524,11 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     // Must precede the draw that samples the texture.
     if (fence_fd >= 0)
         wait_on_acquire_fence(mapper, fence_fd);
+
+    // Covers every command queued so far, the draw that sampled the frame now in prev included.
+    if (p->draw_fence)
+        gl->DeleteSync(p->draw_fence);
+    p->draw_fence = gl->FenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 
     return 0;
 
