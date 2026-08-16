@@ -282,6 +282,13 @@ static int init(struct ra_hwdec *hw)
                 get_dev_proc(p->vk->device, "vkWaitSemaphoresKHR");
         }
     }
+    MP_VERBOSE(hw, "entry points: ahb_props=%s import_sem_fd=%s create_ycbcr=%s "
+               "destroy_ycbcr=%s wait_semaphores=%s (ahb=%s foreign=%s sem_fd=%s)\n",
+               p->get_ahb_props ? "yes" : "no", p->import_sem_fd ? "yes" : "no",
+               p->create_ycbcr ? "yes" : "no", p->destroy_ycbcr ? "yes" : "no",
+               p->wait_semaphores ? "yes" : "no", have_ahb ? "yes" : "no",
+               have_foreign ? "yes" : "no", have_sem_fd ? "yes" : "no");
+
     if (!p->get_ahb_props) {
         MP_MSG(hw, level, "vkGetAndroidHardwareBufferPropertiesANDROID unavailable\n");
         return -1;

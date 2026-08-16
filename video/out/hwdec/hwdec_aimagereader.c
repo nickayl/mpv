@@ -67,6 +67,8 @@ struct priv {
     mp_cond cond;
     bool image_available;
 
+    unsigned frames_mapped, frames_repeated, frames_dropped;
+
     EGLImageKHR (EGLAPIENTRY *CreateImageKHR)(
         EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
     EGLBoolean (EGLAPIENTRY *DestroyImageKHR)(EGLDisplay, EGLImageKHR);
@@ -313,6 +315,9 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     o->AImageReader_setImageListener(o->reader, NULL);
     release_bound_image(mapper);
 
+    MP_VERBOSE(mapper, "mapped %u, repeated %u, dropped %u\n",
+               p->frames_mapped, p->frames_repeated, p->frames_dropped);
+
     gl->DeleteTextures(1, &p->gl_texture);
     p->gl_texture = 0;
 
@@ -349,11 +354,21 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     AImage *image = NULL;
     media_status_t ret = o->AImageReader_acquireLatestImage(o->reader, &image);
     if (ret != AMEDIA_OK) {
-        MP_ERR(mapper, "acquireLatestImage failed: %d\n", ret);
         // A timeout repeats the bound frame; with nothing bound there is none.
-        return image_available || !p->egl_image ? -1 : 0;
+        bool drop = image_available || !p->egl_image;
+        if (drop)
+            p->frames_dropped++;
+        else
+            p->frames_repeated++;
+        MP_ERR(mapper, "acquireLatestImage failed: %d (signalled=%s, bound=%s) -> %s; "
+               "mapped %u, repeated %u, dropped %u\n",
+               ret, image_available ? "yes" : "no", p->egl_image ? "yes" : "no",
+               drop ? "drop frame" : "repeat bound frame",
+               p->frames_mapped, p->frames_repeated, p->frames_dropped);
+        return drop ? -1 : 0;
     }
     mp_assert(image);
+    p->frames_mapped++;
 
     release_bound_image(mapper);
     p->image = image;
