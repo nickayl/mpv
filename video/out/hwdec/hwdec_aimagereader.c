@@ -19,6 +19,7 @@
 
 #include <assert.h>
 #include <dlfcn.h>
+#include <unistd.h>
 #include <EGL/egl.h>
 #include <media/NdkImageReader.h>
 #include <android/native_window_jni.h>
@@ -34,7 +35,11 @@
 
 typedef void *GLeglImageOES;
 typedef void *EGLImageKHR;
+typedef void *EGLSyncKHR;
 #define EGL_NATIVE_BUFFER_ANDROID 0x3140
+#define EGL_SYNC_NATIVE_FENCE_ANDROID 0x3144
+#define EGL_SYNC_NATIVE_FENCE_FD_ANDROID 0x3145
+#define EGL_NO_NATIVE_FENCE_FD_ANDROID -1
 
 struct priv_owner {
     struct mp_hwdec_ctx hwctx;
@@ -49,6 +54,8 @@ struct priv_owner {
     media_status_t (*AImageReader_setImageListener)(
         AImageReader *, AImageReader_ImageListener *);
     media_status_t (*AImageReader_acquireLatestImage)(AImageReader *, AImage **);
+    // Optional: reports the decoder's fence.
+    media_status_t (*AImageReader_acquireLatestImageAsync)(AImageReader *, AImage **, int *);
     void (*AImageReader_delete)(AImageReader *);
     media_status_t (*AImage_getHardwareBuffer)(const AImage *, AHardwareBuffer **);
     void (*AImage_delete)(AImage *);
@@ -68,6 +75,7 @@ struct priv {
     bool image_available;
 
     unsigned frames_mapped, frames_repeated, frames_dropped;
+    unsigned fences_waited, fence_import_failures;
 
     EGLImageKHR (EGLAPIENTRY *CreateImageKHR)(
         EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
@@ -75,6 +83,11 @@ struct priv {
     EGLClientBuffer (EGLAPIENTRY *GetNativeClientBufferANDROID)(
         const struct AHardwareBuffer *);
     void (EGLAPIENTRY *EGLImageTargetTexture2DOES)(GLenum, GLeglImageOES);
+
+    // EGL_ANDROID_native_fence_sync; absent on a driver that cannot import the fence.
+    EGLSyncKHR (EGLAPIENTRY *CreateSyncKHR)(EGLDisplay, EGLenum, const EGLint *);
+    EGLBoolean (EGLAPIENTRY *DestroySyncKHR)(EGLDisplay, EGLSyncKHR);
+    EGLint (EGLAPIENTRY *WaitSyncKHR)(EGLDisplay, EGLSyncKHR, EGLint);
 };
 
 static const struct { const char *symbol; int offset; } lib_functions[] = {
@@ -123,6 +136,14 @@ static bool load_lib_functions(struct priv_owner *p, struct mp_log *log)
         }
 
         *(void **) ((uint8_t*)p + lib_functions[i].offset) = fun;
+    }
+
+    // Optional, and outside the table because its absence is not a failure.
+    p->AImageReader_acquireLatestImageAsync =
+        dlsym(p->lib_handle, "AImageReader_acquireLatestImageAsync");
+    if (!p->AImageReader_acquireLatestImageAsync) {
+        mp_warn(log, "AImageReader_acquireLatestImageAsync is absent: frames are sampled without "
+                     "waiting for the decoder's fence and may tear\n");
     }
     return true;
 }
@@ -249,6 +270,12 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         !p->GetNativeClientBufferANDROID || !p->EGLImageTargetTexture2DOES)
         return -1;
 
+    p->CreateSyncKHR = (void *)eglGetProcAddress("eglCreateSyncKHR");
+    p->DestroySyncKHR = (void *)eglGetProcAddress("eglDestroySyncKHR");
+    p->WaitSyncKHR = (void *)eglGetProcAddress("eglWaitSyncKHR");
+    MP_VERBOSE(mapper, "acquire fence: %s\n",
+               fence_wait_available(p, o) ? "waited on the GPU" : "UNAVAILABLE, frames may tear");
+
     AImageReader_ImageListener listener = {
         .context = p,
         .onImageAvailable = image_callback,
@@ -289,6 +316,35 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
     return 0;
 }
 
+static bool fence_wait_available(struct priv *p, struct priv_owner *o)
+{
+    return o->AImageReader_acquireLatestImageAsync && p->CreateSyncKHR &&
+           p->DestroySyncKHR && p->WaitSyncKHR;
+}
+
+// Makes the GPU wait for the decoder before sampling; takes ownership of the fd.
+static void wait_on_acquire_fence(struct ra_hwdec_mapper *mapper, int fence_fd)
+{
+    struct priv *p = mapper->priv;
+    EGLDisplay display = eglGetCurrentDisplay();
+    const EGLint attribs[] = {
+        EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fence_fd,
+        EGL_NONE,
+    };
+
+    EGLSyncKHR sync = p->CreateSyncKHR(display, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+    if (sync == NULL) {
+        MP_WARN(mapper, "could not import the acquire fence, closing it unwaited\n");
+        close(fence_fd);
+        p->fence_import_failures++;
+        return;
+    }
+
+    p->WaitSyncKHR(display, sync, 0);
+    p->DestroySyncKHR(display, sync);
+    p->fences_waited++;
+}
+
 // Not wired to unmap: an external texture with no EGLImage samples undefined memory.
 static void release_bound_image(struct ra_hwdec_mapper *mapper)
 {
@@ -315,8 +371,9 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     o->AImageReader_setImageListener(o->reader, NULL);
     release_bound_image(mapper);
 
-    MP_VERBOSE(mapper, "mapped %u, repeated %u, dropped %u\n",
-               p->frames_mapped, p->frames_repeated, p->frames_dropped);
+    MP_VERBOSE(mapper, "mapped %u, repeated %u, dropped %u, fences waited %u, fence imports "
+               "failed %u\n", p->frames_mapped, p->frames_repeated, p->frames_dropped,
+               p->fences_waited, p->fence_import_failures);
 
     gl->DeleteTextures(1, &p->gl_texture);
     p->gl_texture = 0;
@@ -334,8 +391,10 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     GL *gl = ra_gl_get(mapper->ra);
 
     {
-        if (mapper->src->imgfmt != IMGFMT_MEDIACODEC)
+        if (mapper->src->imgfmt != IMGFMT_MEDIACODEC) {
+            MP_ERR(mapper, "expected a MediaCodec frame, got imgfmt %d\n", mapper->src->imgfmt);
             return -1;
+        }
         AVMediaCodecBuffer *buffer = (AVMediaCodecBuffer *)mapper->src->planes[3];
         av_mediacodec_release_buffer(buffer, 1);
     }
@@ -352,8 +411,13 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     mp_mutex_unlock(&p->lock);
 
     AImage *image = NULL;
-    media_status_t ret = o->AImageReader_acquireLatestImage(o->reader, &image);
+    int fence_fd = -1;
+    media_status_t ret = fence_wait_available(p, o)
+        ? o->AImageReader_acquireLatestImageAsync(o->reader, &image, &fence_fd)
+        : o->AImageReader_acquireLatestImage(o->reader, &image);
     if (ret != AMEDIA_OK) {
+        if (fence_fd >= 0)
+            close(fence_fd);
         // A timeout repeats the bound frame; with nothing bound there is none.
         bool drop = image_available || !p->egl_image;
         if (drop)
@@ -377,7 +441,7 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     ret = o->AImage_getHardwareBuffer(p->image, &hwbuf);
     if (ret != AMEDIA_OK) {
         MP_ERR(mapper, "getHardwareBuffer failed: %d\n", ret);
-        return -1;
+        goto fail;
     }
     mp_assert(hwbuf);
 
@@ -391,20 +455,36 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     }
 
     EGLClientBuffer buf = p->GetNativeClientBufferANDROID(hwbuf);
-    if (!buf)
-        return -1;
+    if (!buf) {
+        MP_ERR(mapper, "eglGetNativeClientBufferANDROID returned nothing for a %dx%d buffer; "
+               "mapped %u\n", d.width, d.height, p->frames_mapped);
+        goto fail;
+    }
 
     const int attribs[] = {EGL_NONE};
     p->egl_image = p->CreateImageKHR(eglGetCurrentDisplay(),
         EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, buf, attribs);
-    if (!p->egl_image)
-        return -1;
+    if (!p->egl_image) {
+        MP_ERR(mapper, "eglCreateImageKHR failed for a %dx%d buffer (EGL 0x%x); mapped %u\n",
+               d.width, d.height, eglGetError(), p->frames_mapped);
+        goto fail;
+    }
 
     gl->BindTexture(GL_TEXTURE_EXTERNAL_OES, p->gl_texture);
     p->EGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, p->egl_image);
     gl->BindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
 
+    // Must precede the draw that samples the texture.
+    if (fence_fd >= 0)
+        wait_on_acquire_fence(mapper, fence_fd);
+
     return 0;
+
+fail:
+    // Nothing bound: the next timed-out acquire drops instead of repeating.
+    if (fence_fd >= 0)
+        close(fence_fd);
+    return -1;
 }
 
 
