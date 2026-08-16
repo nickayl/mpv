@@ -287,24 +287,11 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
     return 0;
 }
 
-static void mapper_uninit(struct ra_hwdec_mapper *mapper)
-{
-    struct priv *p = mapper->priv;
-    struct priv_owner *o = mapper->owner->priv;
-    GL *gl = ra_gl_get(mapper->ra);
-
-    o->AImageReader_setImageListener(o->reader, NULL);
-
-    gl->DeleteTextures(1, &p->gl_texture);
-    p->gl_texture = 0;
-
-    ra_tex_free(mapper->ra, &mapper->tex[0]);
-
-    mp_mutex_destroy(&p->lock);
-    mp_cond_destroy(&p->cond);
-}
-
-static void mapper_unmap(struct ra_hwdec_mapper *mapper)
+// Releases the frame the external texture samples. Deliberately not wired to an
+// unmap hook: a texture left with no EGLImage samples undefined memory as soon as
+// a frame cannot be acquired, which some drivers show as a green flash. The bound
+// frame is replaced by the next successful map and freed at uninit.
+static void release_bound_image(struct ra_hwdec_mapper *mapper)
 {
     struct priv *p = mapper->priv;
     struct priv_owner *o = mapper->owner->priv;
@@ -318,6 +305,24 @@ static void mapper_unmap(struct ra_hwdec_mapper *mapper)
         o->AImage_delete(p->image);
         p->image = NULL;
     }
+}
+
+static void mapper_uninit(struct ra_hwdec_mapper *mapper)
+{
+    struct priv *p = mapper->priv;
+    struct priv_owner *o = mapper->owner->priv;
+    GL *gl = ra_gl_get(mapper->ra);
+
+    o->AImageReader_setImageListener(o->reader, NULL);
+    release_bound_image(mapper);
+
+    gl->DeleteTextures(1, &p->gl_texture);
+    p->gl_texture = 0;
+
+    ra_tex_free(mapper->ra, &mapper->tex[0]);
+
+    mp_mutex_destroy(&p->lock);
+    mp_cond_destroy(&p->cond);
 }
 
 static int mapper_map(struct ra_hwdec_mapper *mapper)
@@ -344,14 +349,19 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     p->image_available = false;
     mp_mutex_unlock(&p->lock);
 
-    media_status_t ret = o->AImageReader_acquireLatestImage(o->reader, &p->image);
+    AImage *image = NULL;
+    media_status_t ret = o->AImageReader_acquireLatestImage(o->reader, &image);
     if (ret != AMEDIA_OK) {
         MP_ERR(mapper, "acquireLatestImage failed: %d\n", ret);
-        // If we merely timed out waiting return success anyway to avoid
-        // flashing frames of render errors.
-        return image_available ? -1 : 0;
+        // Merely timing out repeats the frame the texture already carries; with
+        // nothing bound yet there is no picture to repeat, and presenting the
+        // texture anyway is what a viewer sees as a green flash at startup.
+        return image_available || !p->egl_image ? -1 : 0;
     }
-    mp_assert(p->image);
+    mp_assert(image);
+
+    release_bound_image(mapper);
+    p->image = image;
 
     AHardwareBuffer *hwbuf = NULL;
     ret = o->AImage_getHardwareBuffer(p->image, &hwbuf);
@@ -400,6 +410,5 @@ const struct ra_hwdec_driver ra_hwdec_aimagereader = {
         .init = mapper_init,
         .uninit = mapper_uninit,
         .map = mapper_map,
-        .unmap = mapper_unmap,
     },
 };
