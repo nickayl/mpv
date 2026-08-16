@@ -77,8 +77,7 @@ static int vulkan_init(struct ra_hwdec *hw)
     VkQueueFamilyProperties2 *qf = NULL;
     VkQueueFamilyVideoPropertiesKHR *qf_vid = NULL;
 
-    // Resolved, not linked: a 1.1 import keeps the library from loading below
-    // Android API 29.
+    // Resolved, not linked: a 1.1 import breaks dlopen below Android API 29.
     PFN_vkGetPhysicalDeviceQueueFamilyProperties2 get_qf_props2 =
         (PFN_vkGetPhysicalDeviceQueueFamilyProperties2)
         vk->vulkan->get_proc_addr(vk->vulkan->instance,

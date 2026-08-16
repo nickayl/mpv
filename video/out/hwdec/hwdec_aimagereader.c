@@ -287,10 +287,7 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
     return 0;
 }
 
-// Releases the frame the external texture samples. Deliberately not wired to an
-// unmap hook: a texture left with no EGLImage samples undefined memory as soon as
-// a frame cannot be acquired, which some drivers show as a green flash. The bound
-// frame is replaced by the next successful map and freed at uninit.
+// Not wired to unmap: an external texture with no EGLImage samples undefined memory.
 static void release_bound_image(struct ra_hwdec_mapper *mapper)
 {
     struct priv *p = mapper->priv;
@@ -353,9 +350,7 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     media_status_t ret = o->AImageReader_acquireLatestImage(o->reader, &image);
     if (ret != AMEDIA_OK) {
         MP_ERR(mapper, "acquireLatestImage failed: %d\n", ret);
-        // Merely timing out repeats the frame the texture already carries; with
-        // nothing bound yet there is no picture to repeat, and presenting the
-        // texture anyway is what a viewer sees as a green flash at startup.
+        // A timeout repeats the bound frame; with nothing bound there is none.
         return image_available || !p->egl_image ? -1 : 0;
     }
     mp_assert(image);

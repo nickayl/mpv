@@ -75,8 +75,7 @@ static inline OPT_STRING_VALIDATE_FUNC(vk_validate_dev)
     AVUUID param_uuid;
     bool is_uuid = av_uuid_parse(*value, param_uuid) == 0;
 
-    // Resolved, not linked: a 1.1 import keeps the library from loading below
-    // Android API 29.
+    // Resolved, not linked: a 1.1 import breaks dlopen below Android API 29.
     PFN_vkGetPhysicalDeviceProperties2 get_props2 =
         (PFN_vkGetPhysicalDeviceProperties2)
         vkGetInstanceProcAddr(inst->instance, "vkGetPhysicalDeviceProperties2");

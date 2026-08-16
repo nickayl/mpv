@@ -88,8 +88,7 @@ struct priv_owner {
     pl_vulkan vk;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_ahb_props;
     PFN_vkImportSemaphoreFdKHR import_sem_fd;
-    // Post-1.0 core entry points; linking them would make libmpv unloadable below
-    // the API level that exports them (Ycbcr 29, timeline waits 31).
+    // Post-1.0 core: an import breaks dlopen below API 29/31.
     PFN_vkCreateSamplerYcbcrConversion create_ycbcr;
     PFN_vkDestroySamplerYcbcrConversion destroy_ycbcr;
     PFN_vkWaitSemaphores wait_semaphores;
@@ -264,8 +263,6 @@ static int init(struct ra_hwdec *hw)
             p->import_sem_fd = (PFN_vkImportSemaphoreFdKHR)
                 get_dev_proc(p->vk->device, "vkImportSemaphoreFdKHR");
         }
-        // Core name first, extension name for a device created below the version
-        // that promoted it.
         p->create_ycbcr = (PFN_vkCreateSamplerYcbcrConversion)
             get_dev_proc(p->vk->device, "vkCreateSamplerYcbcrConversion");
         if (!p->create_ycbcr) {
