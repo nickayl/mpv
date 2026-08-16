@@ -88,6 +88,11 @@ struct priv_owner {
     pl_vulkan vk;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_ahb_props;
     PFN_vkImportSemaphoreFdKHR import_sem_fd;
+    // Post-1.0 core entry points; linking them would make libmpv unloadable below
+    // the API level that exports them (Ycbcr 29, timeline waits 31).
+    PFN_vkCreateSamplerYcbcrConversion create_ycbcr;
+    PFN_vkDestroySamplerYcbcrConversion destroy_ycbcr;
+    PFN_vkWaitSemaphores wait_semaphores;
     uint32_t external_qf;   // VK_QUEUE_FAMILY_FOREIGN_EXT when available
 
     media_status_t (*AImageReader_newWithUsage)(
@@ -112,8 +117,6 @@ struct priv {
     AImage *image;
     AImage *prev_image;
 
-    // Post-1.0 core entry points; linking them would make libmpv unloadable below
-    // the API level that exports them (Ycbcr 29, timeline waits 31).
     PFN_vkCreateSamplerYcbcrConversion create_ycbcr;
     PFN_vkDestroySamplerYcbcrConversion destroy_ycbcr;
     PFN_vkWaitSemaphores wait_semaphores;
@@ -261,9 +264,33 @@ static int init(struct ra_hwdec *hw)
             p->import_sem_fd = (PFN_vkImportSemaphoreFdKHR)
                 get_dev_proc(p->vk->device, "vkImportSemaphoreFdKHR");
         }
+        // Core name first, extension name for a device created below the version
+        // that promoted it.
+        p->create_ycbcr = (PFN_vkCreateSamplerYcbcrConversion)
+            get_dev_proc(p->vk->device, "vkCreateSamplerYcbcrConversion");
+        if (!p->create_ycbcr) {
+            p->create_ycbcr = (PFN_vkCreateSamplerYcbcrConversion)
+                get_dev_proc(p->vk->device, "vkCreateSamplerYcbcrConversionKHR");
+        }
+        p->destroy_ycbcr = (PFN_vkDestroySamplerYcbcrConversion)
+            get_dev_proc(p->vk->device, "vkDestroySamplerYcbcrConversion");
+        if (!p->destroy_ycbcr) {
+            p->destroy_ycbcr = (PFN_vkDestroySamplerYcbcrConversion)
+                get_dev_proc(p->vk->device, "vkDestroySamplerYcbcrConversionKHR");
+        }
+        p->wait_semaphores = (PFN_vkWaitSemaphores)
+            get_dev_proc(p->vk->device, "vkWaitSemaphores");
+        if (!p->wait_semaphores) {
+            p->wait_semaphores = (PFN_vkWaitSemaphores)
+                get_dev_proc(p->vk->device, "vkWaitSemaphoresKHR");
+        }
     }
     if (!p->get_ahb_props) {
         MP_MSG(hw, level, "vkGetAndroidHardwareBufferPropertiesANDROID unavailable\n");
+        return -1;
+    }
+    if (!p->create_ycbcr || !p->destroy_ycbcr || !p->wait_semaphores) {
+        MP_MSG(hw, level, "Ycbcr conversion or timeline semaphore waits unavailable\n");
         return -1;
     }
 
@@ -377,20 +404,9 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
     p->qf = o->vk->queue_compute.index;
     vkGetDeviceQueue(p->dev, p->qf, 0, &p->queue);
 
-    PFN_vkGetDeviceProcAddr get_dev_proc = (PFN_vkGetDeviceProcAddr)
-        o->vk->get_proc_addr(o->vk->instance, "vkGetDeviceProcAddr");
-    if (get_dev_proc) {
-        p->create_ycbcr = (PFN_vkCreateSamplerYcbcrConversion)
-            get_dev_proc(p->dev, "vkCreateSamplerYcbcrConversion");
-        p->destroy_ycbcr = (PFN_vkDestroySamplerYcbcrConversion)
-            get_dev_proc(p->dev, "vkDestroySamplerYcbcrConversion");
-        p->wait_semaphores = (PFN_vkWaitSemaphores)
-            get_dev_proc(p->dev, "vkWaitSemaphores");
-    }
-    if (!p->create_ycbcr || !p->destroy_ycbcr || !p->wait_semaphores) {
-        MP_ERR(mapper, "device lacks Ycbcr conversion or timeline semaphore waits\n");
-        return -1;
-    }
+    p->create_ycbcr = o->create_ycbcr;
+    p->destroy_ycbcr = o->destroy_ycbcr;
+    p->wait_semaphores = o->wait_semaphores;
 
     VkCommandPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
