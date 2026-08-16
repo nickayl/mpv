@@ -239,6 +239,12 @@ static void uninit(struct ra_hwdec *hw)
     }
 }
 
+static bool fence_wait_available(struct priv *p, struct priv_owner *o)
+{
+    return o->AImageReader_acquireLatestImageAsync && p->CreateSyncKHR &&
+           p->DestroySyncKHR && p->WaitSyncKHR;
+}
+
 static void image_callback(void *context, AImageReader *reader)
 {
     struct priv *p = context;
@@ -314,12 +320,6 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         return -1;
 
     return 0;
-}
-
-static bool fence_wait_available(struct priv *p, struct priv_owner *o)
-{
-    return o->AImageReader_acquireLatestImageAsync && p->CreateSyncKHR &&
-           p->DestroySyncKHR && p->WaitSyncKHR;
 }
 
 // Makes the GPU wait for the decoder before sampling; takes ownership of the fd.
