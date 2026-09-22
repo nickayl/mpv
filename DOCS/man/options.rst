@@ -1044,15 +1044,18 @@ Program Behavior
 
         I have no idea.
 
-``--ytdl-format=<|ytdl|best|worst|mp4|webm|...>``
+``--ytdl-format=<ytdl|best|worst|mp4|webm|...>``
     Format selection string that is directly passed to youtube-dl.
     The possible values are specific to the website and the video, for a given
     URL the available formats can be found with the command
     ``youtube-dl -F URL``. See youtube-dl's documentation for available aliases.
-    (Default: empty)
+    (Default: ``bestvideo*+bestaudio/bestvideo+bestaudio/best``)
 
-    An empty value or ``ytdl`` does not pass a ``--format`` option to youtube-dl
-    at all, and thus uses its default format selection behavior.
+    The default selects the best separate video and audio tracks with a muxed
+    fallback.
+
+    The ``ytdl`` value does not pass a ``--format`` option to youtube-dl at
+    all, and thus does not override its default.
 
 ``--ytdl-raw-options=<key>=<value>[,<key>=<value>[,...]]``
     Pass arbitrary options to youtube-dl. Parameter and argument should be
@@ -2132,11 +2135,16 @@ Audio
     List of codecs for which compressed audio passthrough should be used. This
     works for both classic S/PDIF and HDMI.
 
-    Possible codecs are ``ac3``, ``dts``, ``dts-hd``, ``eac3``, ``truehd``.
-    Multiple codecs can be specified by separating them with ``,``. ``dts``
-    refers to low bitrate DTS core, while ``dts-hd`` refers to DTS MA (receiver
-    and OS support varies). If both ``dts`` and ``dts-hd`` are specified, it
-    behaves equivalent to specifying ``dts-hd`` only.
+    Possible codecs are ``ac3``, ``dts``, ``dts-hd``, ``eac3``, ``truehd``,
+    ``dsd``. Multiple codecs can be specified by separating them with ``,``.
+    ``dts`` refers to low bitrate DTS core, while ``dts-hd`` refers to DTS MA
+    (receiver and OS support varies). If both ``dts`` and ``dts-hd`` are
+    specified, it behaves equivalent to specifying ``dts-hd`` only.
+
+    ``dsd`` enables bit-perfect passthrough of DSD audio, requires an audio
+    output with exclusive device access (currently ``wasapi``) and a DAC that
+    accepts DoP at the resulting PCM rate (176.4 kHz for DSD64, 352.8 kHz for
+    DSD128, and so on).
 
     In earlier mpv versions you could use ``--ad`` to force the spdif wrapper.
     This does not work anymore.
@@ -3926,6 +3934,12 @@ Window
 Disc Devices
 ------------
 
+``--disc-menu=<yes|no>``
+    When set, opening ``dvd://`` or ``bd://`` boots into the disc's interactive
+    menu instead of automatically playing the longest title (default: ``no``).
+    The menu can also be reached at any time via the synthetic "Disc Menu"
+    entry in the editions/titles list, or with ``discnav menu`` command.
+
 ``--cdda-device=<path>``
     Specify the CD device for CDDA playback. The default device path depends on
     the OS. See the `OPTICAL DRIVES`_ section.
@@ -3939,6 +3953,21 @@ Disc Devices
     .. admonition:: Example
 
         ``mpv dvd:// --dvd-device=/path/to/dvd/``
+
+``--dvda-device=<path>``
+    Specify the DVD-Audio device or .iso filename for ``dvda://`` playback.
+    You can also specify a directory that contains files previously copied
+    directly from a DVD-Audio disc. The default device path depends on
+    the OS. See the `OPTICAL DRIVES`_ section.
+
+    .. admonition:: Example
+
+        ``mpv dvda:// --dvda-device=/path/to/dvda/``
+
+``--dvda-page=<-1|0-...>``
+    Force the still picture page shown during DVD-Audio playback, instead of
+    the page scheduled for the current playback position (default: -1, use
+    the scheduled page).
 
 ``--bluray-device=<path>``
     Specify the Blu-ray disc location. Must be a directory with Blu-ray

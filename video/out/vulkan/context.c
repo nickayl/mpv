@@ -211,6 +211,7 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
         VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
         VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
         VK_KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY_EXTENSION_NAME,
+        VK_NV_OPTICAL_FLOW_EXTENSION_NAME,
         /*
          * Extensions below this point are newer than our minimum required Vulkan
          * headers and so we only activate them if the build time headers contain
@@ -245,6 +246,9 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
 #ifdef VK_KHR_video_decode_vp9
         VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME, /* 1.4.317 */
 #endif
+#ifdef VK_KHR_maintenance9
+        VK_KHR_MAINTENANCE_9_EXTENSION_NAME, /* 1.4.317 */
+#endif
     };
 
     /*
@@ -253,9 +257,19 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
      * the next extension that chains on to it will also be present.
      */
 
+#ifdef VK_KHR_maintenance9
+    VkPhysicalDeviceMaintenance9FeaturesKHR maintenance_9_feature = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_9_FEATURES_KHR,
+        .maintenance9 = true,
+    };
+#endif
+
 #ifdef VK_KHR_video_decode_vp9
      VkPhysicalDeviceVideoDecodeVP9FeaturesKHR video_decode_vp9_feature = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_DECODE_VP9_FEATURES_KHR,
+#ifdef VK_KHR_maintenance9
+        .pNext = &maintenance_9_feature,
+#endif
         .videoDecodeVP9 = true,
     };
 #endif
@@ -338,9 +352,15 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
        .shaderZeroInitializeWorkgroupMemory = true,
     };
 
+    VkPhysicalDeviceOpticalFlowFeaturesNV optical_flow_feature = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV,
+        .pNext = &zero_init_feature,
+        .opticalFlow = true,
+    };
+
     VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
-        .pNext = &zero_init_feature,
+        .pNext = &optical_flow_feature,
        .dynamicRendering = true,
     };
 
@@ -399,6 +419,13 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
     bool is_uuid = opts->device &&
                    av_uuid_parse(opts->device, param_uuid) == 0;
 
+    /*
+     * Request extra queue families opportunistically. These will only be
+     * enabled if present.
+     */
+    VkQueueFlags extra_queues = VK_QUEUE_VIDEO_DECODE_BIT_KHR |
+                                VK_QUEUE_OPTICAL_FLOW_BIT_NV;
+
     mp_assert(pllog);
     mp_assert(vkinst);
     struct pl_vulkan_params device_params = {
@@ -409,7 +436,7 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
         .async_transfer = opts->async_transfer,
         .async_compute = opts->async_compute,
         .queue_count = opts->queue_count,
-        .extra_queues = VK_QUEUE_VIDEO_DECODE_BIT_KHR,
+        .extra_queues = extra_queues,
         .opt_extensions = opt_extensions,
         .num_opt_extensions = MP_ARRAY_SIZE(opt_extensions),
         .features = &features,
