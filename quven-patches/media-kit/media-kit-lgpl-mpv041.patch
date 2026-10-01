@@ -1,0 +1,789 @@
+diff --git a/buildscripts/build.sh b/buildscripts/build.sh
+index 33282bd..a7f7cda 100755
+--- a/buildscripts/build.sh
++++ b/buildscripts/build.sh
+@@ -112,7 +112,7 @@ build () {
+ 	printf >&2 '\e[1;34m%s\e[m\n' "Building $1..."
+ 	pushd deps/$1
+ 	BUILDSCRIPT=../../scripts/$1.sh
+- 	sudo chmod +x $BUILDSCRIPT
++	chmod +x $BUILDSCRIPT
+ 	[ $cleanbuild -eq 1 ] && $BUILDSCRIPT clean
+     $BUILDSCRIPT build
+     popd
+diff --git a/buildscripts/flavors/default.sh b/buildscripts/flavors/default.sh
+index 744bb61..2c8d4f0 100644
+--- a/buildscripts/flavors/default.sh
++++ b/buildscripts/flavors/default.sh
+@@ -39,7 +39,7 @@ cpuflags=
+ 	--pkg-config-flags=--static \
+ 	\
+ 	--disable-muxers \
+-	--disable-decoders \
++	--enable-decoders \
+ 	--disable-encoders \
+ 	--disable-demuxers \
+ 	--disable-parsers \
+@@ -48,7 +48,6 @@ cpuflags=
+ 	--disable-filters \
+ 	--disable-doc \
+ 	--disable-avdevice \
+-	--disable-postproc \
+ 	--disable-programs \
+ 	--disable-gray \
+ 	--disable-swscale-alpha \
+@@ -83,66 +82,8 @@ cpuflags=
+ 	--enable-swscale \
+ 	--enable-swresample \
+ 	\
+-	--enable-decoder=flv \
+-	--enable-decoder=h263 \
+-	--enable-decoder=h263i \
+-	--enable-decoder=h263p \
+-	--enable-decoder=h264* \
+-	--enable-decoder=mpeg1video \
+-	--enable-decoder=mpeg2* \
+-	--enable-decoder=mpeg4* \
+-	--enable-decoder=vp6 \
+-	--enable-decoder=vp6a \
+-	--enable-decoder=vp6f \
+-	--enable-decoder=vp8* \
+-	--enable-decoder=vp9* \
+-	--enable-decoder=hevc* \
+-	--enable-decoder=av1* \
+-	--enable-decoder=libdav1d \
+-	--enable-decoder=theora \
+-	--enable-decoder=msmpeg* \
+-	--enable-decoder=mjpeg* \
+-	--enable-decoder=wmv* \
+ 	\
+-	--enable-decoder=aac* \
+-	--enable-decoder=ac3 \
+-	--enable-decoder=alac \
+-	--enable-decoder=als \
+-	--enable-decoder=ape \
+-	--enable-decoder=atrac* \
+-	--enable-decoder=eac3 \
+-	--enable-decoder=flac \
+-	--enable-decoder=gsm* \
+-	--enable-decoder=mp1* \
+-	--enable-decoder=mp2* \
+-	--enable-decoder=mp3* \
+-	--enable-decoder=mpc* \
+-	--enable-decoder=opus \
+-	--enable-decoder=ra* \
+-	--enable-decoder=ralf \
+-	--enable-decoder=shorten \
+-	--enable-decoder=tak \
+-	--enable-decoder=tta \
+-	--enable-decoder=vorbis \
+-	--enable-decoder=wavpack \
+-	--enable-decoder=wma* \
+-	--enable-decoder=pcm* \
+-	--enable-decoder=dsd* \
+-	--enable-decoder=dca \
+ 	\
+-	--enable-decoder=ssa \
+-	--enable-decoder=ass \
+-	--enable-decoder=dvbsub \
+-	--enable-decoder=dvdsub \
+-	--enable-decoder=srt \
+-	--enable-decoder=stl \
+-	--enable-decoder=subrip \
+-	--enable-decoder=subviewer \
+-	--enable-decoder=subviewer1 \
+-	--enable-decoder=text \
+-	--enable-decoder=vplayer \
+-	--enable-decoder=webvtt \
+-	--enable-decoder=movtext \
+ 	\
+ 	--enable-demuxer=concat \
+ 	--enable-demuxer=data \
+@@ -222,6 +163,7 @@ cpuflags=
+ 	\
+ 	--enable-filter=overlay \
+ 	--enable-filter=equalizer \
++	--enable-filter=dynaudnorm \
+ 	\
+ 	--enable-protocol=async \
+ 	--enable-protocol=cache \
+diff --git a/buildscripts/include/depinfo.sh b/buildscripts/include/depinfo.sh
+index bd218ce..e212306 100755
+--- a/buildscripts/include/depinfo.sh
++++ b/buildscripts/include/depinfo.sh
+@@ -9,12 +9,16 @@ v_sdk_build_tools=33.0.2
+ v_libass=0.17.1
+ v_harfbuzz=7.2.0
+ v_fribidi=1.0.12
++v_expat=R_2_6_4
++v_fontconfig=2.15.0
+ v_freetype=2-13-0
+ v_mbedtls=3.4.0
+ v_dav1d=1.2.0
++v_libplacebo=v7.351.0
+ v_libxml2=2.10.3
+-v_ffmpeg=6.0
+-v_mpv=78d43740f52db817d98bcf24fb30a76ab6fa13ff
++v_ffmpeg=8.1.2
++v_mpv=2c219aa822df18a1b7fd9abe3e151cd93ad67307
++v_libiconv=1.17
+ v_libogg=1.3.5
+ v_libvorbis=1.3.7
+ v_libvpx=1.13
+@@ -25,20 +29,24 @@ v_libvpx=1.13
+ 
+ dep_mbedtls=()
+ dep_dav1d=()
++dep_libplacebo=()
++dep_libiconv=()
+ dep_libvorbis=(libogg)
+ if [ -n "${ENCODERS_GPL+x}" ]; then
+-	dep_ffmpeg=(mbedtls dav1d libxml2 libvorbis libvpx libx264)
++	dep_ffmpeg=(libiconv mbedtls dav1d libxml2 libvorbis libvpx libx264)
+ else
+-	dep_ffmpeg=(mbedtls dav1d libxml2)
++	dep_ffmpeg=(libiconv mbedtls dav1d libxml2)
+ fi
+ dep_freetype2=()
+ dep_fribidi=()
++dep_expat=()
++dep_fontconfig=(freetype expat)
+ dep_harfbuzz=()
+-dep_libass=(freetype fribidi harfbuzz)
++dep_libass=(freetype fribidi harfbuzz fontconfig)
+ dep_lua=()
+ dep_shaderc=()
+ if [ -n "${ENCODERS_GPL+x}" ]; then
+-	dep_mpv=(ffmpeg libass fftools_ffi)
++	dep_mpv=(ffmpeg libass fftools_ffi libplacebo)
+ else
+-	dep_mpv=(ffmpeg libass)
++	dep_mpv=(ffmpeg libass libplacebo)
+ fi
+diff --git a/buildscripts/include/download-deps.sh b/buildscripts/include/download-deps.sh
+index bec6b31..3b2b9fe 100755
+--- a/buildscripts/include/download-deps.sh
++++ b/buildscripts/include/download-deps.sh
+@@ -25,7 +25,12 @@ mkdir -p deps && cd deps
+ [ ! -d libvpx ] && git clone --depth 1 --branch meson-$v_libvpx https://gitlab.freedesktop.org/gstreamer/meson-ports/libvpx.git
+ 
++# libiconv
++[ ! -d libiconv ] && $WGET https://ftp.gnu.org/pub/gnu/libiconv/libiconv-${v_libiconv}.tar.gz && tar -xf libiconv-${v_libiconv}.tar.gz && mv libiconv-${v_libiconv} libiconv && rm libiconv-${v_libiconv}.tar.gz
++
+ # libx264
+-[ ! -d libx264 ] && git clone --depth 1 https://code.videolan.org/videolan/x264.git --branch master libx264
++if [ -n "${ENCODERS_GPL+x}" ]; then
++	[ ! -d libx264 ] && git clone --depth 1 https://code.videolan.org/videolan/x264.git --branch master libx264
++fi
+ 
+ # ffmpeg
+ [ ! -d ffmpeg ] && git clone --depth 1 --branch n$v_ffmpeg https://github.com/FFmpeg/FFmpeg.git ffmpeg
+@@ -36,6 +38,12 @@ mkdir -p deps && cd deps
+ # fribidi
+ [ ! -d fribidi ] && git clone --depth 1 --branch v$v_fribidi https://github.com/fribidi/fribidi.git fribidi
+ 
++# expat
++[ ! -d expat ] && git clone --depth 1 --branch $v_expat https://github.com/libexpat/libexpat.git expat
++
++# fontconfig
++[ ! -d fontconfig ] && git clone --depth 1 --branch $v_fontconfig https://gitlab.freedesktop.org/fontconfig/fontconfig.git fontconfig
++
+ # harfbuzz
+ [ ! -d harfbuzz ] && git clone --depth 1 --branch $v_harfbuzz https://github.com/harfbuzz/harfbuzz.git harfbuzz
+ 
+@@ -50,15 +58,13 @@ see <ndk>/sources/third_party/shaderc
+ HEREDOC
+ 
+ # mpv
+-[ ! -d mpv ] && git clone https://github.com/mpv-player/mpv.git mpv && cd mpv && git reset --hard 78d43740f52db817d98bcf24fb30a76ab6fa13ff && cd ..
++[ ! -d libplacebo ] && git clone --depth 1 --branch $v_libplacebo https://code.videolan.org/videolan/libplacebo.git libplacebo && \
++	( cd libplacebo && git submodule update --init 3rdparty/glad 3rdparty/fast_float 3rdparty/jinja 3rdparty/markupsafe )
++[ ! -d mpv ] && mkdir mpv && cd mpv && git init && git remote add origin https://github.com/mpv-player/mpv.git && git fetch --depth 1 origin $v_mpv && git checkout -q FETCH_HEAD && cd ..
+ 
+ # fftools_ffi
+-[ ! -d fftools_ffi ] && git clone https://github.com/moffatman/fftools-ffi.git fftools_ffi && cd fftools_ffi && git reset --hard 9b0d4da026d9c830702ec043c1f1f98d407025af && cd ..
+-
+-# media-kit-android-helper
+-[ ! -d media-kit-android-helper ] && git clone --branch main https://github.com/media-kit/media-kit-android-helper.git && cd media-kit-android-helper && git reset --hard 42054e5d479f39ccbb0ae604862e2bcaf59b74c2 && cd ..
+-
+-# media_kit
+-[ ! -d media_kit ] && git clone --depth 1 --single-branch --branch main https://github.com/alexmercerind/media_kit.git
++if [ -n "${ENCODERS_GPL+x}" ]; then
++	[ ! -d fftools_ffi ] && git clone https://github.com/moffatman/fftools-ffi.git fftools_ffi && cd fftools_ffi && git reset --hard 9b0d4da026d9c830702ec043c1f1f98d407025af && cd ..
++fi
+ 
+ cd ..
+diff --git a/buildscripts/include/download-sdk.sh b/buildscripts/include/download-sdk.sh
+index 45261eb..98b9d01 100755
+--- a/buildscripts/include/download-sdk.sh
++++ b/buildscripts/include/download-sdk.sh
+@@ -60,7 +60,7 @@ sdkmanager () {
+ 	[ -x "$exe" ] || exe="./android-sdk-$os/cmdline-tools/bin/sdkmanager"
+ 	"$exe" --sdk_root="${ANDROID_HOME}" "$@"
+ }
+-echo y | sdkmanager \
++yes | sdkmanager \
+ 	"platforms;android-33" \
+ 	"build-tools;${v_sdk_build_tools}" \
+ 	"ndk;${v_ndk}" \
+diff --git a/buildscripts/include/path.sh b/buildscripts/include/path.sh
+index 5b9839e..c76e08d 100755
+--- a/buildscripts/include/path.sh
++++ b/buildscripts/include/path.sh
+@@ -23,7 +23,7 @@ if [ -n "$ndk_triple" ]; then
+ 	unset PKG_CONFIG_PATH
+ fi
+ 
+-toolchain=$(echo "$DIR/sdk/android-sdk-linux/ndk/$v_ndk/toolchains/llvm/prebuilt/"*)
+-export PATH="$toolchain/bin:$DIR/sdk/android-sdk-linux/ndk/$v_ndk:$DIR/sdk/bin:$PATH"
++toolchain=$(echo "$DIR/sdk/android-sdk-$os/ndk/$v_ndk/toolchains/llvm/prebuilt/"*)
++export PATH="$toolchain/bin:$DIR/sdk/android-sdk-$os/ndk/$v_ndk:$DIR/sdk/bin:$PATH"
+ export ANDROID_HOME="$DIR/sdk/android-sdk-$os"
+ unset ANDROID_SDK_ROOT ANDROID_NDK_ROOT
+diff --git a/buildscripts/patches/ffmpeg/dash_base_url_escape.patch b/buildscripts/patches/ffmpeg/dash_base_url_escape.patch
+deleted file mode 100644
+index 36ed6d5..0000000
+--- a/buildscripts/patches/ffmpeg/dash_base_url_escape.patch
++++ /dev/null
+@@ -1,26 +0,0 @@
+-diff --git a/libavformat/dashdec.c b/libavformat/dashdec.c
+-index 29d4680..c50afaf 100644
+---- a/libavformat/dashdec.c
+-+++ b/libavformat/dashdec.c
+-@@ -768,7 +768,9 @@ static int resolve_content_path(AVFormatContext *s, const char *url, int *max_ur
+-     baseurl = xmlNodeGetContent(node);
+-     root_url = (av_strcasecmp(baseurl, "")) ? baseurl : path;
+-     if (node) {
+--        xmlNodeSetContent(node, root_url);
+-+        char* root_url_content = xmlEncodeSpecialChars(NULL, root_url);
+-+        xmlNodeSetContent(node, root_url_content);
+-+        xmlFree(root_url_content);
+-         updated = 1;
+-     }
+- 
+-@@ -802,7 +804,9 @@ static int resolve_content_path(AVFormatContext *s, const char *url, int *max_ur
+-                 memset(p + 1, 0, strlen(p));
+-             }
+-             av_strlcat(tmp_str, text + start, tmp_max_url_size);
+--            xmlNodeSetContent(baseurl_nodes[i], tmp_str);
+-+            char* tmp_str_content = xmlEncodeSpecialChars(NULL, tmp_str);
+-+            xmlNodeSetContent(baseurl_nodes[i], tmp_str_content);
+-+            xmlFree(tmp_str_content);
+-             updated = 1;
+-             xmlFree(text);
+-         }
+diff --git a/buildscripts/patches/ffmpeg/hls_mp4_seek.patch b/buildscripts/patches/ffmpeg/hls_mp4_seek.patch
+deleted file mode 100644
+index 58bffce..0000000
+--- a/buildscripts/patches/ffmpeg/hls_mp4_seek.patch
++++ /dev/null
+@@ -1,14 +0,0 @@
+-diff --git a/libavformat/hls.c b/libavformat/hls.c
+-index 2a2fe28a540f..c625e3029116 100644
+---- a/libavformat/hls.c
+-+++ b/libavformat/hls.c
+-@@ -2506,6 +2506,9 @@ static int hls_read_seek(AVFormatContext *s, int stream_index,
+-         /* Flush the packet queue of the subdemuxer. */
+-         ff_read_frame_flush(pls->ctx);
+- 
+-+        /* Reset the init segment so it's re-fetched and served appropiately */
+-+        pls->cur_init_section = NULL;
+-+
+-         pls->seek_timestamp = seek_timestamp;
+-         pls->seek_flags = flags;
+- 
+diff --git a/buildscripts/patches/fontconfig/android_system_font_fallback.patch b/buildscripts/patches/fontconfig/android_system_font_fallback.patch
+new file mode 100644
+index 0000000..4dfc0a9
+--- /dev/null
++++ b/buildscripts/patches/fontconfig/android_system_font_fallback.patch
+@@ -0,0 +1,13 @@
++diff --git a/src/fcinit.c b/src/fcinit.c
++index 3e607f4..73e3f05 100644
++--- a/src/fcinit.c
+++++ b/src/fcinit.c
++@@ -47,4 +47,8 @@ FcInitFallbackConfig (const FcChar8 *sysroot)
++ 	"  <include ignore_missing=\"yes\">" CONFIGDIR "</include>" \
++ 	"  <include ignore_missing=\"yes\" prefix=\"xdg\">fontconfig/conf.d</include>" \
++ 	"  <include ignore_missing=\"yes\" prefix=\"xdg\">fontconfig/fonts.conf</include>" \
+++	"  <alias><family>sans</family><prefer><family>Roboto</family><family>Noto Sans</family><family>Droid Sans</family></prefer></alias>" \
+++	"  <alias><family>sans-serif</family><prefer><family>Roboto</family><family>Noto Sans</family><family>Droid Sans</family></prefer></alias>" \
+++	"  <alias><family>serif</family><prefer><family>Noto Serif</family><family>Droid Serif</family></prefer></alias>" \
+++	"  <alias><family>monospace</family><prefer><family>Droid Sans Mono</family><family>Noto Sans Mono</family></prefer></alias>" \
++ 	"</fontconfig>";
+diff --git a/buildscripts/patches/mpv/mpv_aaudio_iec61937_header_compat.patch b/buildscripts/patches/mpv/mpv_aaudio_iec61937_header_compat.patch
+new file mode 100644
+index 0000000..c0cb961
+--- /dev/null
++++ b/buildscripts/patches/mpv/mpv_aaudio_iec61937_header_compat.patch
+@@ -0,0 +1,15 @@
++diff --git a/audio/out/ao_aaudio.c b/audio/out/ao_aaudio.c
++--- a/audio/out/ao_aaudio.c
+++++ b/audio/out/ao_aaudio.c
++@@ -23,6 +23,11 @@
++ #include <dlfcn.h>
++ #include <stdint.h>
++ 
++ #include <aaudio/AAudio.h>
+++#ifndef AAUDIO_FORMAT_IEC61937
+++/* Keep older NDK headers compiling while mpv guards use by runtime API level. */
+++#define AAUDIO_FORMAT_IEC61937 5
+++#endif
+++
++ #include <android/api-level.h>
++ 
+diff --git a/buildscripts/patches/mpv/mpv_lavc_set_java_vm.patch b/buildscripts/patches/mpv/mpv_lavc_set_java_vm.patch
+index a5a5e92..614cfef 100644
+--- a/buildscripts/patches/mpv/mpv_lavc_set_java_vm.patch
++++ b/buildscripts/patches/mpv/mpv_lavc_set_java_vm.patch
+@@ -1,38 +1,35 @@
+-diff --git a/libmpv/client.h b/libmpv/client.h
+-index fb10e5e..afbc952 100644
+---- a/libmpv/client.h
+-+++ b/libmpv/client.h
+-@@ -1707,6 +1707,15 @@ MPV_EXPORT mpv_event *mpv_wait_event(mpv_handle *ctx, double timeout);
++diff --git a/include/mpv/client.h b/include/mpv/client.h
++index 85cff63bd5..ba4bba6f69 100644
++--- a/include/mpv/client.h
+++++ b/include/mpv/client.h
++@@ -1730,6 +1730,12 @@ MPV_EXPORT mpv_event *mpv_wait_event(mpv_handle *ctx, double timeout);
+   */
+  MPV_EXPORT void mpv_wakeup(mpv_handle *ctx);
+  
+ +/**
+-+ * Calls av_jni_set_java_vm() with the given JavaVM*.
+-+ * https://github.com/FFmpeg/FFmpeg/blob/0ba719f726632d73592311615087a0d64aa2fb60/libavcodec/jni.h#L26-L36
+-+ * 
+-+ * The av_jni_set_java_vm() symbol is not visible when statically linking with libavcodec.
+-+ * It is important to call this method so that libavcodec can access JNI environment & thus, mediacodec APIs.
+++ * Calls av_jni_set_java_vm() with the given JavaVM*, exposing the otherwise
+++ * statically-linked libavcodec JNI symbol so mediacodec hardware decode works.
+ + */
+ +MPV_EXPORT int mpv_lavc_set_java_vm(void *vm);
+ +
+  /**
+   * Set a custom function that should be called when there are new events. Use
+   * this if blocking in mpv_wait_event() to wait for new events is not feasible.
+-diff --git a/libmpv/mpv.def b/libmpv/mpv.def
+-index 232490d..d7a2842 100644
++diff --git a/player/client.c b/player/client.c
++index e23b98b00f..5130a46cfa 100644
+ --- a/player/client.c
+ +++ b/player/client.c
+-@@ -22,6 +22,8 @@
+- #include <math.h>
+- #include <assert.h>
++@@ -14,6 +14,8 @@
++  */
+  
+-+#include <libavcodec/jni.h>
++ #include <assert.h>
+ +
+- #include "common/common.h"
+- #include "common/global.h"
+- #include "common/msg.h"
+-@@ -967,6 +969,10 @@ void mpv_wakeup(mpv_handle *ctx)
+-     pthread_mutex_unlock(&ctx->lock);
+++#include <libavcodec/jni.h>
++ #include <errno.h>
++ #include <fcntl.h>
++ #include <math.h>
++@@ -964,6 +966,10 @@ void mpv_wakeup(mpv_handle *ctx)
++     mp_mutex_unlock(&ctx->lock);
+  }
+  
+ +int mpv_lavc_set_java_vm(void *vm) {
+diff --git a/buildscripts/scripts/expat.sh b/buildscripts/scripts/expat.sh
+new file mode 100755
+index 0000000..da5c3ca
+--- /dev/null
++++ b/buildscripts/scripts/expat.sh
+@@ -0,0 +1,43 @@
++#!/bin/bash -e
++
++. ../../include/depinfo.sh
++. ../../include/path.sh
++
++build=_build$ndk_suffix
++
++if [ "$1" == "build" ]; then
++	true
++elif [ "$1" == "clean" ]; then
++	rm -rf $build
++	exit 0
++else
++	exit 255
++fi
++
++case "$ndk_triple" in
++	aarch64*) android_abi=arm64-v8a ;;
++	arm-*) android_abi=armeabi-v7a ;;
++	i686*) android_abi=x86 ;;
++	x86_64*) android_abi=x86_64 ;;
++	*) echo "unknown Android ABI for $ndk_triple" >&2; exit 1 ;;
++esac
++
++cmake -S expat -B $build -G Ninja \
++	-DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/$v_ndk/build/cmake/android.toolchain.cmake" \
++	-DANDROID_ABI="$android_abi" \
++	-DANDROID_PLATFORM=android-21 \
++	-DCMAKE_INSTALL_PREFIX=/ \
++	-DCMAKE_BUILD_TYPE=Release \
++	-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
++	-DEXPAT_SHARED_LIBS=OFF \
++	-DEXPAT_BUILD_TOOLS=OFF \
++	-DEXPAT_BUILD_EXAMPLES=OFF \
++	-DEXPAT_BUILD_TESTS=OFF \
++	-DEXPAT_BUILD_DOCS=OFF \
++	-DEXPAT_BUILD_PKGCONFIG=ON \
++	-DEXPAT_WITH_LIBBSD=OFF \
++	-DEXPAT_WITH_GETRANDOM=OFF \
++	-DEXPAT_WITH_SYS_GETRANDOM=OFF
++
++ninja -C $build -j$cores
++DESTDIR="$prefix_dir" ninja -C $build install
+diff --git a/buildscripts/scripts/ffmpeg.sh b/buildscripts/scripts/ffmpeg.sh
+new file mode 100755
+index 0000000..2c8d4f0
+--- /dev/null
++++ b/buildscripts/scripts/ffmpeg.sh
+@@ -0,0 +1,209 @@
++#!/bin/bash -e
++
++. ../../include/depinfo.sh
++. ../../include/path.sh
++
++if [ "$1" == "build" ]; then
++	true
++elif [ "$1" == "clean" ]; then
++	rm -rf _build$ndk_suffix
++	exit 0
++else
++	exit 255
++fi
++
++mkdir -p _build$ndk_suffix
++cd _build$ndk_suffix
++
++cpu=armv7-a
++[[ "$ndk_triple" == "aarch64"* ]] && cpu=armv8-a
++[[ "$ndk_triple" == "x86_64"* ]] && cpu=generic
++[[ "$ndk_triple" == "i686"* ]] && cpu="i686 --disable-asm"
++
++cpuflags=
++[[ "$ndk_triple" == "arm"* ]] && cpuflags="$cpuflags -mfpu=neon -mcpu=cortex-a8"
++
++../configure \
++	--target-os=android --enable-cross-compile --cross-prefix=$ndk_triple- --ar=$AR --cc=$CC --nm=llvm-nm --ranlib=$RANLIB \
++	--arch=${ndk_triple%%-*} --cpu=$cpu --pkg-config=pkg-config \
++	--extra-cflags="-I$prefix_dir/include $cpuflags" --extra-ldflags="-L$prefix_dir/lib" \
++	\
++	--disable-gpl \
++	--disable-nonfree \
++	--enable-version3 \
++	--enable-static \
++	--disable-shared \
++	--disable-vulkan \
++	--enable-iconv \
++	--disable-stripping \
++	--pkg-config-flags=--static \
++	\
++	--disable-muxers \
++	--enable-decoders \
++	--disable-encoders \
++	--disable-demuxers \
++	--disable-parsers \
++	--disable-protocols \
++	--disable-devices \
++	--disable-filters \
++	--disable-doc \
++	--disable-avdevice \
++	--disable-programs \
++	--disable-gray \
++	--disable-swscale-alpha \
++	\
++	--enable-jni \
++	--enable-bsfs \
++	--enable-mediacodec \
++	\
++	--disable-dxva2 \
++	--disable-vaapi \
++	--disable-vdpau \
++	--disable-bzlib \
++	--disable-linux-perf \
++	--disable-videotoolbox \
++	--disable-audiotoolbox \
++	\
++	--enable-small \
++	--enable-hwaccels \
++	--enable-optimizations \
++	--enable-runtime-cpudetect \
++	\
++	--enable-mbedtls \
++	\
++	--enable-libdav1d \
++	\
++	--enable-libxml2 \
++	\
++	--enable-avutil \
++	--enable-avcodec \
++	--enable-avfilter \
++	--enable-avformat \
++	--enable-swscale \
++	--enable-swresample \
++	\
++	\
++	\
++	\
++	--enable-demuxer=concat \
++	--enable-demuxer=data \
++	--enable-demuxer=flv \
++	--enable-demuxer=hls \
++	--enable-demuxer=latm \
++	--enable-demuxer=live_flv \
++	--enable-demuxer=loas \
++	--enable-demuxer=m4v \
++	--enable-demuxer=mov \
++	--enable-demuxer=mpegps \
++	--enable-demuxer=mpegts \
++	--enable-demuxer=mpegvideo \
++	--enable-demuxer=hevc \
++	--enable-demuxer=rtsp \
++	--enable-demuxer=mpeg4 \
++	--enable-demuxer=mjpeg* \
++	--enable-demuxer=avi \
++	--enable-demuxer=av1 \
++	--enable-demuxer=matroska \
++	--enable-demuxer=dash \
++	--enable-demuxer=webm_dash_manifest \
++	\
++	--enable-demuxer=aac \
++	--enable-demuxer=ac3 \
++	--enable-demuxer=aiff \
++	--enable-demuxer=ape \
++	--enable-demuxer=asf \
++	--enable-demuxer=au \
++	--enable-demuxer=avi \
++	--enable-demuxer=flac \
++	--enable-demuxer=flv \
++	--enable-demuxer=matroska \
++	--enable-demuxer=mov \
++	--enable-demuxer=m4v \
++	--enable-demuxer=mp3 \
++	--enable-demuxer=mpc* \
++	--enable-demuxer=ogg \
++	--enable-demuxer=pcm* \
++	--enable-demuxer=rm \
++	--enable-demuxer=shorten \
++	--enable-demuxer=tak \
++	--enable-demuxer=tta \
++	--enable-demuxer=wav \
++	--enable-demuxer=wv \
++	--enable-demuxer=xwma \
++	--enable-demuxer=dsf \
++	--enable-demuxer=truehd \
++        --enable-demuxer=dts \
++        --enable-demuxer=dtshd \
++	\
++	--enable-demuxer=ass \
++	--enable-demuxer=srt \
++	--enable-demuxer=stl \
++	--enable-demuxer=webvtt \
++	--enable-demuxer=subviewer \
++	--enable-demuxer=subviewer1 \
++	--enable-demuxer=vplayer \
++	\
++	--enable-parser=h263 \
++	--enable-parser=h264 \
++	--enable-parser=hevc \
++	--enable-parser=mpeg4 \
++	--enable-parser=mpeg4video \
++	--enable-parser=mpegvideo \
++	\
++	--enable-parser=aac* \
++	--enable-parser=ac3 \
++	--enable-parser=cook \
++	--enable-parser=dca \
++	--enable-parser=flac \
++	--enable-parser=gsm \
++	--enable-parser=mpegaudio \
++	--enable-parser=tak \
++	--enable-parser=vorbis \
++ 	--enable-parser=dca \
++	\
++	--enable-filter=overlay \
++	--enable-filter=equalizer \
++	--enable-filter=dynaudnorm \
++	\
++	--enable-protocol=async \
++	--enable-protocol=cache \
++	--enable-protocol=crypto \
++	--enable-protocol=data \
++	--enable-protocol=ffrtmphttp \
++	--enable-protocol=file \
++	--enable-protocol=ftp \
++	--enable-protocol=hls \
++	--enable-protocol=http \
++	--enable-protocol=httpproxy \
++	--enable-protocol=https \
++	--enable-protocol=pipe \
++	--enable-protocol=rtmp \
++	--enable-protocol=rtmps \
++	--enable-protocol=rtmpt \
++	--enable-protocol=rtmpts \
++	--enable-protocol=rtp \
++	--enable-protocol=subfile \
++	--enable-protocol=tcp \
++	--enable-protocol=tls \
++	--enable-protocol=srt \
++	\
++	--enable-encoder=mjpeg \
++	--enable-encoder=ljpeg \
++	--enable-encoder=jpegls \
++	--enable-encoder=jpeg2000 \
++	--enable-encoder=png \
++	--enable-encoder=jpegls \
++	\
++	--enable-network \
++
++make -j$cores
++make DESTDIR="$prefix_dir" install
++
++ln -sf "$prefix_dir"/lib/libswresample.so "$native_dir"
++ln -sf "$prefix_dir"/lib/libpostproc.so "$native_dir"
++ln -sf "$prefix_dir"/lib/libavutil.so "$native_dir"
++ln -sf "$prefix_dir"/lib/libavcodec.so "$native_dir"
++ln -sf "$prefix_dir"/lib/libavformat.so "$native_dir"
++ln -sf "$prefix_dir"/lib/libswscale.so "$native_dir"
++ln -sf "$prefix_dir"/lib/libavfilter.so "$native_dir"
++ln -sf "$prefix_dir"/lib/libavdevice.so "$native_dir"
+diff --git a/buildscripts/scripts/libiconv.sh b/buildscripts/scripts/libiconv.sh
+new file mode 100755
+index 0000000..f18f246
+--- /dev/null
++++ b/buildscripts/scripts/libiconv.sh
+@@ -0,0 +1,27 @@
++#!/bin/bash -e
++
++. ../../include/depinfo.sh
++. ../../include/path.sh
++
++build=_build$ndk_suffix
++
++if [ "$1" == "build" ]; then
++	true
++elif [ "$1" == "clean" ]; then
++	rm -rf $build
++	exit 0
++else
++	exit 255
++fi
++
++rm -rf $build
++mkdir -p $build
++cd $build
++
++CFLAGS="-fPIC" \
++CPPFLAGS="-I$prefix_dir/include" \
++LDFLAGS="-L$prefix_dir/lib" \
++../configure --host=$ndk_triple --prefix=/ --enable-static --disable-shared --disable-nls
++
++make -j$cores
++make DESTDIR="$prefix_dir" install
+diff --git a/buildscripts/scripts/fontconfig.sh b/buildscripts/scripts/fontconfig.sh
+new file mode 100755
+index 0000000..efa8d59
+--- /dev/null
++++ b/buildscripts/scripts/fontconfig.sh
+@@ -0,0 +1,39 @@
++#!/bin/bash -e
++
++. ../../include/depinfo.sh
++. ../../include/path.sh
++
++build=_build$ndk_suffix
++
++if [ "$1" == "build" ]; then
++	true
++elif [ "$1" == "clean" ]; then
++	rm -rf $build
++	exit 0
++else
++	exit 255
++fi
++
++unset CC CXX # meson wants these unset
++
++if ! grep -q 'Noto Sans' src/fcinit.c; then
++	git apply ../../patches/fontconfig/android_system_font_fallback.patch
++fi
++
++meson setup $build --cross-file "$prefix_dir"/crossfile.txt --prefix / \
++	-Ddoc=disabled \
++	-Ddoc-txt=disabled \
++	-Ddoc-man=disabled \
++	-Ddoc-pdf=disabled \
++	-Ddoc-html=disabled \
++	-Dnls=disabled \
++	-Dtests=disabled \
++	-Dtools=disabled \
++	-Dcache-build=disabled \
++	-Diconv=disabled \
++	-Ddefault-fonts-dirs=/system/fonts \
++	-Dadditional-fonts-dirs=no \
++	-Dcache-dir=/data/data/tv.quven.mobile/cache/fontconfig
++
++ninja -C $build -j$cores
++DESTDIR="$prefix_dir" ninja -C $build install
+diff --git a/buildscripts/scripts/libass.sh b/buildscripts/scripts/libass.sh
+index fd95d94..fb8f018 100755
+--- a/buildscripts/scripts/libass.sh
++++ b/buildscripts/scripts/libass.sh
+@@ -24,7 +24,7 @@ cd _build$ndk_suffix
+ 	--disable-asm \
+ 	--enable-static\
+ 	--disable-shared \
+-	--disable-require-system-font-provider
++	--enable-fontconfig
+ 
+ make -j$cores
+ make DESTDIR="$prefix_dir" install
+diff --git a/buildscripts/scripts/libplacebo.sh b/buildscripts/scripts/libplacebo.sh
+new file mode 100755
+index 0000000..93b56dd
+--- /dev/null
++++ b/buildscripts/scripts/libplacebo.sh
+@@ -0,0 +1,21 @@
++#!/bin/bash -e
++
++. ../../include/depinfo.sh
++. ../../include/path.sh
++
++build=_build$ndk_suffix
++
++if [ "$1" == "build" ]; then
++	true
++elif [ "$1" == "clean" ]; then
++	rm -rf $build
++	exit 0
++else
++	exit 255
++fi
++
++unset CC CXX
++meson setup $build --cross-file "$prefix_dir"/crossfile.txt --prefix / -Dvulkan=disabled -Dopengl=enabled -Ddemos=false
++ninja -C $build -j$cores
++DESTDIR="$prefix_dir" ninja -C $build install
++${SED:-sed} '/^Libs:/ s|$| -lc++|' "$prefix_dir/lib/pkgconfig/libplacebo.pc" -i
+diff --git a/buildscripts/scripts/mpv.sh b/buildscripts/scripts/mpv.sh
+index 7e4ea4e..b94d459 100755
+--- a/buildscripts/scripts/mpv.sh
++++ b/buildscripts/scripts/mpv.sh
+@@ -25,7 +25,6 @@ meson setup $build --cross-file "$prefix_dir"/crossfile.txt \
+  	-Dcplayer=false \
+ 	-Diconv=disabled \
+ 	-Dvulkan=disabled \
+-   	-Dlibplacebo=disabled \
+  	-Dmanpage-build=disabled
+ 
+ ninja -C $build -j$cores

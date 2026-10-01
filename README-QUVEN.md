@@ -5,11 +5,22 @@ This is a public fork of [mpv](https://github.com/mpv-player/mpv) maintained by 
 Quven Android and iOS clients; publishing the modified sources here satisfies libmpv's LGPL-2.1+
 §6 source offer.
 
-Two branches carry changes, both based on upstream master and kept in sync via periodic merges;
-`master` tracks upstream and carries no changes:
+Two branches carry changes, both based on upstream master and kept in sync via periodic merges.
+`master` holds exactly the source of the libmpv the Android client ships, with the build patches
+below:
 
-- **`quven/android-vk-interop`** — the Android MediaCodec/Vulkan interop below.
+- **`quven/android-vk-interop`** — the Android MediaCodec/Vulkan interop below; `master` follows it.
 - **`quven/metal-context`** — everything above plus the iOS/macOS Metal integration below.
+
+## Build patches
+
+The shipped libraries are built from this source with two patches carried in `quven-patches/`:
+
+- `quven-patches/media-kit/media-kit-lgpl-mpv041.patch` — applies to
+  [media-kit/libmpv-android-video-build](https://github.com/media-kit/libmpv-android-video-build) at
+  `1ecf5100ec0f75e1d0630f48851b85769c92eed2`: the LGPL toolchain, mpv 0.41 and FFmpeg 8.1.2.
+- `quven-patches/ffmpeg/quven-ffmpeg-dovi-mediacodec.patch` — applies to FFmpeg n8.1.2: attaches
+  the Dolby Vision RPU to MediaCodec frames.
 
 ## How this fork diverges from upstream
 
