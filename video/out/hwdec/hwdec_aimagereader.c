@@ -184,11 +184,9 @@ static int init(struct ra_hwdec *hw)
     else
         hw->glsl_extensions = es2_exts;
 
-    // This sets the upper bound for AImages we can acquire from this reader
-    // (incl. ones currently queued) at the same time.
-    // The documentation recommends a margin of 2 for acquireLatestImage to
-    // work correctly.
-    const int max_images = 3;
+    // The upper bound of AImages acquired from this reader at once, queued ones included: the bound
+    // image and the one held back until its draw retires, plus the margin of 2 acquireLatestImage needs.
+    const int max_images = 5;
     // dummy dimensions, AImageReader only transports hardware buffers
     media_status_t ret = p->AImageReader_newWithUsage(16, 16,
         AIMAGE_FORMAT_PRIVATE, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
