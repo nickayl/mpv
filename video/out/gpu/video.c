@@ -17,6 +17,7 @@
 
 #include <assert.h>
 #include <float.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -2575,12 +2576,8 @@ static void pass_convert_yuv(struct gl_video *p)
 
     GLSL(color.rgb = mat3(colormatrix) * color.rgb + colormatrix_c;)
 
-    if (cparams.repr.sys == PL_COLOR_SYSTEM_XYZ) {
+    if (cparams.repr.sys == PL_COLOR_SYSTEM_XYZ)
         pass_delinearize(p->sc, p->image_params.color.transfer);
-        // mp_get_csp_matrix implicitly converts XYZ to DCI-P3
-        p->image_params.repr.sys = PL_COLOR_SYSTEM_RGB;
-        p->image_params.color.primaries = PL_COLOR_PRIM_DCI_P3;
-    }
 
     if (p->image_params.repr.sys == PL_COLOR_SYSTEM_BT_2020_C) {
         // Conversion for C'rcY'cC'bc via the BT.2020 CL system:
@@ -3094,7 +3091,7 @@ static void pass_dither(struct gl_video *p, const struct ra_fbo *fbo)
     // screen. The superfluous bits will be used for rounding according to the
     // dither matrix. The precision of the source implicitly decides how many
     // dither patterns can be visible.
-    int dither_quantization = (1 << dst_depth) - 1;
+    uint32_t dither_quantization = UINT32_MAX >> (32 - dst_depth);
     int dither_size = p->dither_texture->params.w;
 
     gl_sc_uniform_texture(p->sc, "dither", p->dither_texture);
@@ -3117,7 +3114,8 @@ static void pass_dither(struct gl_video *p, const struct ra_fbo *fbo)
     }
 
     GLSL(float dither_value = texture(dither, dither_pos).r;)
-    GLSLF("color = floor(color * %d.0 + dither_value + 0.5 / %d.0) * 1.0/%d.0;\n",
+    GLSLF("color = floor(color * %" PRIu32 ".0 + dither_value + 0.5 / %d.0) * "
+          "1.0/%" PRIu32 ".0;\n",
           dither_quantization, dither_size * dither_size, dither_quantization);
 }
 
