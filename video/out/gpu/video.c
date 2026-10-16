@@ -17,6 +17,7 @@
 
 #include <assert.h>
 #include <float.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -1891,6 +1892,12 @@ static void reinit_scaler(struct gl_video *p, struct scaler *scaler,
     float *weights = talloc_array(NULL, float, lut_size * stride);
     mp_compute_lut(scaler->kernel, lut_size, stride, weights);
 
+    for (int n = 0; n < lut_size; n++) {
+        float *row = weights + n * stride;
+        for (int i = size; i < stride; i++)
+            row[i] = row[i - num_components];
+    }
+
     bool use_1d = scaler->kernel->polar && (p->ra->caps & RA_CAP_TEX_1D);
 
     struct ra_tex_params lut_params = {
@@ -2569,12 +2576,8 @@ static void pass_convert_yuv(struct gl_video *p)
 
     GLSL(color.rgb = mat3(colormatrix) * color.rgb + colormatrix_c;)
 
-    if (cparams.repr.sys == PL_COLOR_SYSTEM_XYZ) {
+    if (cparams.repr.sys == PL_COLOR_SYSTEM_XYZ)
         pass_delinearize(p->sc, p->image_params.color.transfer);
-        // mp_get_csp_matrix implicitly converts XYZ to DCI-P3
-        p->image_params.repr.sys = PL_COLOR_SYSTEM_RGB;
-        p->image_params.color.primaries = PL_COLOR_PRIM_DCI_P3;
-    }
 
     if (p->image_params.repr.sys == PL_COLOR_SYSTEM_BT_2020_C) {
         // Conversion for C'rcY'cC'bc via the BT.2020 CL system:
@@ -3088,7 +3091,7 @@ static void pass_dither(struct gl_video *p, const struct ra_fbo *fbo)
     // screen. The superfluous bits will be used for rounding according to the
     // dither matrix. The precision of the source implicitly decides how many
     // dither patterns can be visible.
-    int dither_quantization = (1 << dst_depth) - 1;
+    uint32_t dither_quantization = UINT32_MAX >> (32 - dst_depth);
     int dither_size = p->dither_texture->params.w;
 
     gl_sc_uniform_texture(p->sc, "dither", p->dither_texture);
@@ -3111,7 +3114,8 @@ static void pass_dither(struct gl_video *p, const struct ra_fbo *fbo)
     }
 
     GLSL(float dither_value = texture(dither, dither_pos).r;)
-    GLSLF("color = floor(color * %d.0 + dither_value + 0.5 / %d.0) * 1.0/%d.0;\n",
+    GLSLF("color = floor(color * %" PRIu32 ".0 + dither_value + 0.5 / %d.0) * "
+          "1.0/%" PRIu32 ".0;\n",
           dither_quantization, dither_size * dither_size, dither_quantization);
 }
 
@@ -3792,12 +3796,6 @@ void gl_video_set_clear_color(struct gl_video *p, struct m_color c)
 void gl_video_set_osd_pts(struct gl_video *p, double pts)
 {
     p->osd_pts = pts;
-}
-
-bool gl_video_check_osd_change(struct gl_video *p, struct mp_osd_res *res,
-                               double pts)
-{
-    return p->osd ? mpgl_osd_check_change(p->osd, res, pts) : false;
 }
 
 void gl_video_resize(struct gl_video *p,
