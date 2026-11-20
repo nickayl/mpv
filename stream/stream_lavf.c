@@ -339,6 +339,10 @@ static int open_f(stream_t *stream)
     stream->seekable = false;
 
     int flags = stream->mode == STREAM_WRITE ? AVIO_FLAG_WRITE : AVIO_FLAG_READ;
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    if (flags & AVIO_FLAG_WRITE)
+        goto out;
+#endif
 
     const char *filename = stream->url;
     if (!filename) {
@@ -348,15 +352,21 @@ static int open_f(stream_t *stream)
     for (int i = 0; i < MP_ARRAY_SIZE(prefix); i++)
         if (!strncmp(filename, prefix[i], strlen(prefix[i])))
             filename += strlen(prefix[i]);
+    // URLs that libavformat handles in a demuxer rather than in a protocol.
+    // The demuxer opens the URL itself, so there is no stream layer and
+    // demux_lavf does all the real work.
+    char *lavf_demuxer = NULL;
     if (!strncmp(filename, "rtsp:", 5) || !strncmp(filename, "rtsps:", 6)) {
-        /* This is handled as a special demuxer, without a separate
-         * stream layer. demux_lavf will do all the real work. Note
-         * that libavformat doesn't even provide a protocol entry for
-         * this (the rtsp demuxer's probe function checks for a "rtsp:"
-         * filename prefix), so it has to be handled specially here.
-         */
+        lavf_demuxer = "rtsp";
+    } else if (!strncmp(filename, "rtp:", 4)) {
+        lavf_demuxer = "rtp";
+    }
+    if (lavf_demuxer) {
         stream->demuxer = "lavf";
-        stream->lavf_type = "rtsp";
+        stream->lavf_type = lavf_demuxer;
+        stream->streaming = true;
+        if (stream->info->stream_origin == STREAM_ORIGIN_NET)
+            stream->is_network = true;
         talloc_free(temp);
         return STREAM_OK;
     }
@@ -380,6 +390,10 @@ static int open_f(stream_t *stream)
     av_dict_set(&dict, "reconnect_delay_max", "7", 0);
 
     mp_setup_av_network_options(&dict, NULL, stream->global, stream->log);
+
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    av_dict_set(&dict, "protocol_blacklist", "fd,pipe", 0);
+#endif
 
     AVIOInterruptCB cb = {
         .callback = interrupt_cb,

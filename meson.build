@@ -27,7 +27,7 @@ libavutil = dependency('libavutil', version: '>= 58.29.100')
 libswresample = dependency('libswresample', version: '>= 4.12.100')
 libswscale = dependency('libswscale', version: '>= 7.5.100')
 
-libplacebo = dependency('libplacebo', version: '>=7.360.1',
+libplacebo = dependency('libplacebo', version: '>=7.387.0',
                 default_options: ['default_library=static', 'demos=false'])
 
 libass = dependency('libass', version: '>= 0.12.2')
@@ -269,6 +269,7 @@ sources = files(
     'video/out/placebo/utils.c',
     'video/out/vo_gpu_next.c',
     'video/out/gpu_next/context.c',
+    'video/out/gpu_next/video.c',
 
     ## osdep
     'osdep/io.c',
@@ -399,6 +400,7 @@ if not features['win32-threads']
                                          'pthread_condattr_setclock',
                                          args: '-D_GNU_SOURCE',
                                          dependencies: pthreads)}
+    features += {'pr-set-timerslack': cc.has_header_symbol('sys/prctl.h', 'PR_SET_TIMERSLACK')}
     dependencies += pthreads
 endif
 
@@ -474,8 +476,11 @@ features += {'ppoll': cc.has_function('ppoll', args: '-D_GNU_SOURCE',
                                       prefix: '#include <poll.h>')}
 features += {'memrchr': cc.has_function('memrchr', args: '-D_GNU_SOURCE',
                                         prefix: '#include <string.h>')}
+features += {'pipe2': cc.has_function('pipe2', args: '-D_GNU_SOURCE',
+                                      prefix: '#include <unistd.h>')}
 features += {'clone': cc.has_header_symbol('sched.h', 'clone', args: '-D_GNU_SOURCE')}
-features += {'rfork': cc.has_header_symbol('unistd.h', 'rfork_thread')}
+features += {'rfork': cc.has_header_symbol('unistd.h', 'RFSPAWN') and
+                      cc.has_function('rfork_thread', prefix: '#include <unistd.h>')}
 
 optical_devices = {
     'windows': 'D:',
@@ -524,14 +529,14 @@ if features['win32-desktop']
                           cc.find_library('dwmapi'),
                           cc.find_library('gdi32'),
                           cc.find_library('imm32'),
-                          cc.find_library('ntdll'),
                           cc.find_library('ole32'),
                           cc.find_library('pathcch'),
                           cc.find_library('shcore'),
                           cc.find_library('user32'),
                           cc.find_library('uuid'),
                           cc.find_library('uxtheme'),
-                          cc.find_library('version')]
+                          cc.find_library('version'),
+                          cc.find_library('winmm')]
     dependencies += win32_desktop_libs
     path_source = files('osdep/path-win.c')
     if not get_option('fuzzers')
@@ -1014,7 +1019,7 @@ gbm_opt = get_option('gbm').require(
     features['drm'],
     error_message: 'drm was not found!'
 )
-gbm = dependency('gbm', version: '>= 17.1.0', required: gbm_opt)
+gbm = dependency('gbm', version: '>= 21.3.0', required: gbm_opt)
 features += {'gbm': gbm.found()}
 if features['gbm']
     dependencies += gbm

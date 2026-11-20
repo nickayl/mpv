@@ -26,6 +26,7 @@
 
 #include "mpv_talloc.h"
 
+#include "codec_tags.h"
 #include "demux.h"
 #include "timeline.h"
 #include "common/msg.h"
@@ -271,9 +272,19 @@ static struct tl_root *parse_edl(bstr str, struct mp_log *log)
                     mp_err(log, "Invalid or missing !delay_open media type.\n");
                     goto error;
                 }
-                sh->codec->codec = get_param0(&ctx, sh, "codec");
-                if (!sh->codec->codec)
-                    sh->codec->codec = "null";
+                const char *codec = get_param0(&ctx, sh, "codec");
+                if (codec) {
+                    const char *mapped = mp_map_rfc6381_to_codec(sh->type, codec);
+                    if (mapped) {
+                        codec = mapped;
+                    } else if (sh->type != STREAM_SUB &&
+                               strcmp(codec, "null") != 0)
+                    {
+                        mp_verbose(log, "Ignoring unknown codec '%s'.\n", codec);
+                        codec = NULL;
+                    }
+                }
+                sh->codec->codec = codec ? codec : "null";
                 sh->codec->disp_w = get_param_int(&ctx, "w", 0);
                 sh->codec->disp_h = get_param_int(&ctx, "h", 0);
                 sh->codec->fps = get_param_int(&ctx, "fps", 0);
@@ -582,7 +593,8 @@ static void fix_filenames(struct tl_parts *parts, char *source_path)
     bstr proto = mp_split_proto(bstr0(source_path), NULL);
     // Don't adjust self-expanding protocols
     if (!bstrcasecmp0(proto, "memory") || !bstrcasecmp0(proto, "lavf") ||
-        !bstrcasecmp0(proto, "hex") || !bstrcasecmp0(proto, "edl"))
+        !bstrcasecmp0(proto, "hex") || !bstrcasecmp0(proto, "edl") ||
+        !bstrcasecmp0(proto, "ffmpeg") || !bstrcasecmp0(proto, "data"))
     {
         return;
     }

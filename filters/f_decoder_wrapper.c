@@ -221,6 +221,7 @@ struct priv {
     // --- Specific access depending on threading stuff.
     struct mp_async_queue *queue; // decoded frame output queue
     struct mp_dispatch_queue *dec_dispatch; // non-NULL if decoding thread used
+    bool eof_output;    // an EOF went out: the stream is done for this decoder
     bool dec_thread_lock; // debugging (esp. for no-thread case)
     mp_thread dec_thread;
     bool dec_thread_valid;
@@ -346,6 +347,7 @@ static void decf_reset(struct mp_filter *f)
     mp_mutex_unlock(&p->cache_lock);
 
     p->coverart_returned = 0;
+    p->eof_output = false;
 
     for (int n = 0; n < p->num_reverse_queue; n++)
         mp_frame_unref(&p->reverse_queue[n]);
@@ -892,10 +894,15 @@ static void correct_audio_pts(struct priv *p, struct mp_aframe *aframe)
             }
         }
 
-        // Keep the interpolated timestamp if it doesn't deviate more
-        // than 1 ms from the real one. (MKV rounded timestamps.)
-        if (p->pts == MP_NOPTS_VALUE || diff > 0.001)
+        // The timestamps of the file are rounded, and can be off by more
+        // than that for a few packets. The pts continues by the samples and
+        // moves to the timestamp by their distance per second, which follows
+        // timestamps that run faster or slower than the samples. Further
+        // apart than the rounding tolerance they are a jump in the file.
+        if (p->pts == MP_NOPTS_VALUE || diff >= MP_PTS_ROUNDING_TOLERANCE)
             p->pts = frame_pts;
+        else
+            p->pts += (frame_pts - p->pts) * frame_len;
     }
 
     if (p->pts == MP_NOPTS_VALUE && p->header->missing_timestamps)
@@ -958,6 +965,11 @@ static void feed_packet(struct priv *p)
         return;
 
     if (p->decoded_coverart.type)
+        return;
+
+    // Don't read after EOF was output. If the stream continues, the player
+    // creates a new decoder.
+    if (p->eof_output)
         return;
 
     if (!p->packet.type && !p->new_segment) {
@@ -1167,6 +1179,7 @@ static void read_frame(struct priv *p)
 
 output_frame:
     process_output_frame(p, frame);
+    p->eof_output = frame.type == MP_FRAME_EOF;
     mp_pin_in_write(pin, frame);
 }
 

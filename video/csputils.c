@@ -97,9 +97,7 @@ const struct m_opt_choice_alternatives pl_csp_trc_names[] = {
     {"s-log1",      PL_COLOR_TRC_S_LOG1},
     {"s-log2",      PL_COLOR_TRC_S_LOG2},
     {"st428",       PL_COLOR_TRC_ST428},
-#if PL_API_VER >= 362
     {"scrgb",       PL_COLOR_TRC_SCRGB},
-#endif
     {0}
 };
 
@@ -325,7 +323,7 @@ void mp_get_csp_matrix(struct mp_csp_params *params, struct pl_transform3x3 *m)
     switch (colorspace) {
     case PL_COLOR_SYSTEM_BT_601:     luma_coeffs(m, 0.299,  0.587,  0.114 ); break;
     case PL_COLOR_SYSTEM_BT_709:     luma_coeffs(m, 0.2126, 0.7152, 0.0722); break;
-    case PL_COLOR_SYSTEM_SMPTE_240M: luma_coeffs(m, 0.2122, 0.7013, 0.0865); break;
+    case PL_COLOR_SYSTEM_SMPTE_240M: luma_coeffs(m, 0.212,  0.701,  0.087 ); break;
     case PL_COLOR_SYSTEM_BT_2020_NC: luma_coeffs(m, 0.2627, 0.6780, 0.0593); break;
     case PL_COLOR_SYSTEM_BT_2020_C: {
         // Note: This outputs into the [-0.5,0.5] range for chroma information.
